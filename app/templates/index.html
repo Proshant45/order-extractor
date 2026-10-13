@@ -4,8 +4,8 @@
 <form id="up" class="drop"><input type="file" name="file" id="f" accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.xlsx,.csv,.docx,.zip">
 <button class="btn dark" type="submit">Upload &amp; Extract</button><span class="hint">One file at a time (or a .zip). PDF, image, XLSX, CSV, DOCX. Max {{max_mb}} MB.</span></form>
 <div id="res"></div></section>
-<section class="card"><h3>Orders</h3><table class="grid"><thead><tr><th>#</th><th>Buyer</th><th>Style</th><th>Factory</th><th>PO(s)</th><th>Source file</th><th>Status</th><th></th></tr></thead><tbody>
-{% for o in orders %}<tr><td>{{o.id}}</td><td>{{o.buyer_name or ''}}</td><td>{{o.style_number or ''}}</td><td>{{o.factory or ''}}</td><td>{{o.po_numbers or ''}}</td><td>{{o.file_name or ''}}</td><td><span class="pill {{o.status}}">{{o.status}}</span></td><td><a class="btn blue sm" href="/orders/{{o.id}}">Open</a></td></tr>
+<section class="card"><h3>Orders</h3><table class="grid"><thead><tr><th>#</th><th>Buyer</th><th>Style</th><th>Factory</th><th>PO(s)</th><th>Source file</th><th>Status</th><th>Agreement</th><th></th></tr></thead><tbody>
+{% for o in orders %}<tr><td>{{o.id}}</td><td>{{o.buyer_name or ''}}</td><td>{{o.style_number or ''}}</td><td>{{o.factory or ''}}</td><td>{{o.po_numbers or ''}}</td><td>{{o.file_name or ''}}</td><td><span class="pill {{o.status}}">{{o.status}}</span></td><td><span class="pill {{o.review_status}}">{{(o.review_status or "")|replace("_"," ")}}</span></td><td><a class="btn blue sm" href="/orders/{{o.id}}">Open</a></td></tr>
 {% else %}<tr><td colspan="8" class="muted">No orders yet. Upload a document above.</td></tr>{% endfor %}</tbody></table></section>
 <section class="card"><h3>Recent files</h3><table class="grid"><thead><tr><th>#</th><th>File</th><th>Type</th><th>Status</th><th>Method / reason</th></tr></thead><tbody>
 {% for f in files %}<tr><td>{{f.id}}</td><td>{% if f.parent_id %}↳ {% endif %}{{f.name}}</td><td>{{f.kind or ''}}</td><td><span class="pill {{f.status}}">{{f.status}}</span></td><td>{{f.method or ''}} {{f.reason or ''}}{% if f.order_id %} <a href="/orders/{{f.order_id}}">order {{f.order_id}}</a>{% endif %}</td></tr>{% endfor %}</tbody></table></section>
@@ -18,6 +18,12 @@ document.getElementById('up').onsubmit=async e=>{e.preventDefault();const f=docu
 const r=document.getElementById('res');r.innerHTML='<p class="muted">Extracting '+f.name+'…</p>';const fd=new FormData();fd.append('file',f);
 const resp=await fetch('/api/upload',{method:'POST',body:fd});const j=await resp.json().catch(()=>({detail:resp.statusText}));
 if(!resp.ok){r.innerHTML='<p class="err">'+(j.detail||'Upload failed')+'</p>';return}
+const S=j.summary,L={pdf_text:'PDF (text)',pdf_scanned:'PDF (scanned)',image:'Image',xlsx:'XLSX',csv:'CSV',docx:'DOCX',zip:'ZIP',other:'Other'};
+const t=document.createElement('div');t.className='toast';t.id='summary';t.innerHTML=`<button class="x" onclick="this.parentNode.remove()">×</button><h4>Upload summary: ${S.upload}</h4>
+<table><tr><td>Files received</td><td><b>${S.files_received}</b></td></tr>${Object.entries(S.by_format).filter(([k,v])=>v).map(([k,v])=>`<tr><td>· ${L[k]}</td><td>${v}</td></tr>`).join('')}
+<tr><td>Extracted OK</td><td><b style="color:#167a33">${S.extracted_ok}</b></td></tr><tr><td>Skipped</td><td><b style="color:#8a6100">${S.skipped}</b></td></tr>
+<tr><td>Failed</td><td><b style="color:#a12">${S.failed}</b></td></tr><tr><td>Auto-accepted (A=B)</td><td><b style="color:#167a33">${S.accepted}</b></td></tr><tr><td>Needs review</td><td><b style="color:#a12">${S.needs_review}</b></td></tr><tr><td>Need AI reader</td><td>${S.need_ai}</td></tr><tr><td>Read by AI</td><td>${S.used_ai}</td></tr></table>
+${S.skipped_reasons.length?'<details open><summary>Skipped / failed reasons</summary><ul>'+S.skipped_reasons.map(x=>`<li>${x.name}: ${x.reason}</li>`).join('')+'</ul></details>':''}`;document.body.appendChild(t);
 r.innerHTML='<table class="grid"><tr><th>File</th><th>Status</th><th>Detail</th></tr>'+j.items.map(i=>`<tr><td>${i.name}</td><td><span class="pill ${i.status}">${i.status}</span></td><td>${i.order_id?`<a href="/orders/${i.order_id}">open order ${i.order_id}</a> `:''}${i.reason||''}${(i.warnings||[]).length?' · '+i.warnings.length+' warning(s)':''}</td></tr>`).join('')+'</table>';
-const done=j.items.filter(i=>i.order_id);if(j.items.length==1&&done.length==1)location.href='/orders/'+done[0].order_id;};
+const done=j.items.filter(i=>i.order_id);};
 </script>{% endblock %}

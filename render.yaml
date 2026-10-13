@@ -3,7 +3,7 @@ services:
     name: order-extractor
     runtime: python
     plan: starter            # persistent disks need a paid instance; on free, SQLite resets on every deploy/restart
-    buildCommand: pip install -r requirements.txt
+    buildCommand: ./scripts/build.sh
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1 --timeout-keep-alive 30
     healthCheckPath: /healthz
     envVars:

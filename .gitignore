@@ -6,3 +6,5 @@ __pycache__/
 tests/fixtures/*.pdf
 screenshots/
 diff.json
+bin/opencode
+.ochome/

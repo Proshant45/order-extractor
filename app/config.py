@@ -20,6 +20,9 @@ ZIP_MAX_RATIO = float(os.getenv("ZIP_MAX_RATIO", "100"))
 ZIP_MAX_DEPTH = 1
 
 def llm_provider():
+    if os.getenv("EXTRACTOR", "").lower() == "opencode":
+        from .opencode_provider import available
+        return "opencode" if available() else None
     if os.getenv("GEMINI_API_KEY"):
         return "gemini"
     if os.getenv("OPENAI_API_KEY"):

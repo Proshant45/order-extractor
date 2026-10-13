@@ -9,3 +9,6 @@ openpyxl
 python-docx
 pillow
 httpx
+xlrd
+bcrypt
+itsdangerous

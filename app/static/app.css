@@ -17,3 +17,8 @@ table.grid{width:100%;border-collapse:collapse;background:#fafafa}.grid th{backg
 .warnbox div{background:#fff8e1;border-left:3px solid #f0b400;padding:6px 10px;margin-bottom:4px;border-radius:4px}.warnbox .e{background:#fdecec;border-color:#d33}.warnbox .ok{background:#e5f7ea;border-color:#2a2}
 .muted{color:#777}.err{color:#c22}.drop{display:flex;gap:12px;align-items:center;border:1px dashed #7aa7e9;background:#f5f9ff;padding:14px;border-radius:6px}.hint{color:#555;font-size:12px}
 input.bad{border-color:#d33;background:#fff0f0}
+body.login{justify-content:center;align-items:center;min-height:100vh}.loginbox{width:340px;display:flex;flex-direction:column;gap:12px;padding:28px}.loginbox h1{font-size:20px}
+.toast{position:fixed;right:20px;top:20px;width:380px;background:#fff;border-radius:8px;box-shadow:0 6px 24px #0003;padding:14px 16px;z-index:9;border-left:4px solid #1e7be6}
+.toast h4{margin:0 0 8px}.toast .x{float:right;cursor:pointer;border:0;background:none;font-size:16px}.toast table{width:100%;font-size:12px}.toast td{padding:2px 4px}
+.logout{margin:16px 6px 0}
+.pill.accepted{background:#dcf5e3;color:#167a33}.pill.needs_review{background:#fde2e2;color:#a12}.pill.reviewed{background:#e6efff;color:#1e5bb8}.review.needs_review{border-left:4px solid #d33}.review.accepted{border-left:4px solid #2a2}tr.bad td{background:#fff3f3}

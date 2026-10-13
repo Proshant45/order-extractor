@@ -24,7 +24,9 @@ EXPECTED_LINES = [  # style, color_code, color, rate, net_value, order_qty, size
 
 @pytest.fixture(scope="module")
 def client():
-    with TestClient(main.app) as c:
+    with TestClient(main.app, base_url="https://testserver") as c:
+        r = c.post("/login", data={"username": "tester", "password": "pw-123456"}, follow_redirects=False)
+        assert r.status_code == 303
         yield c
 
 def up(client, name, data):
@@ -180,3 +182,71 @@ def test_pages_render(client):
     assert "Order Book" in client.get("/").text
     oid = client.get("/api/orders").json()[0]["id"]
     assert "Add PO" in client.get(f"/orders/{oid}").text
+
+def test_auth_required_and_rate_limit():
+    with TestClient(main.app, base_url="https://testserver") as c:
+        assert c.get("/healthz").status_code == 200
+        assert c.get("/api/orders").status_code == 401
+        assert c.post("/api/upload", files={"file": ("a.pdf", b"%PDF")}).status_code == 401
+        assert c.post("/api/extract", files={"file": ("a.pdf", b"%PDF")}).status_code == 401
+        r = c.get("/", follow_redirects=False); assert r.status_code == 303 and r.headers["location"] == "/login"
+        codes = [c.post("/login", data={"username": "tester", "password": "nope"}, follow_redirects=False).status_code for _ in range(6)]
+        assert codes[:5] == [401] * 5 and codes[5] == 429
+        r = c.post("/login", data={"username": "tester", "password": "pw-123456"}, follow_redirects=False)
+        assert r.status_code == 429   # locked even with the right password
+    main.auth._fails.clear()
+    with TestClient(main.app, base_url="https://testserver") as c:
+        r = c.post("/login", data={"username": "tester", "password": "pw-123456"}, follow_redirects=False)
+        ck = r.headers["set-cookie"].lower()
+        assert "httponly" in ck and "secure" in ck and "samesite=strict" in ck
+        assert c.get("/api/orders").status_code == 200
+        c.post("/logout"); c.cookies.clear()
+        assert c.get("/api/orders").status_code == 401
+
+def test_upload_summary_counts(client):
+    import openpyxl
+    wb = openpyxl.Workbook(); ws = wb.active; ws.append(["PO Number:", "Z1"]); ws.append(["Color", "S", "M"]); ws.append(["Red", 1, 2]); b = io.BytesIO(); wb.save(b)
+    data = _zip([("a/sample.pdf", PDF.read_bytes()), ("a/o.csv", b"PO Number:,Z2\nColor,S,M\nBlue,3,4\n"), ("a/o.xlsx", b.getvalue()),
+                 ("a/pic.png", _png_of_page1()), ("__MACOSX/a/._x", b"j"), ("a/.DS_Store", b"j"), ("a/bad.pdf", b"%PDF-1.4 broken"),
+                 ("in.zip", _zip([("n.csv", b"PO Number:,Z3\nColor,S,M\nGreen,5,6\n")]))])
+    j = client.post("/api/upload", files={"file": ("mix.zip", data)}).json()
+    s = j["summary"]
+    assert s["files_received"] == 8
+    assert s["by_format"] == {"pdf_text": 2, "pdf_scanned": 0, "image": 1, "xlsx": 1, "csv": 2, "docx": 0, "zip": 2, "other": 2}
+    assert s["extracted_ok"] == 4 and s["skipped"] == 4 and s["need_ai"] == 1
+    logs = client.get(f"/api/files/{j['zip_id']}/logs").json()
+    assert any(l["level"] == "summary" and "UPLOAD SUMMARY" in l["message"] for l in logs)
+
+def test_api_extract_shape(client):
+    j = client.post("/api/extract", files={"file": ("sample_po.pdf", PDF.read_bytes())}).json()
+    r = j["results"][0]
+    assert r["status"] == "done" and r["format"] == "pdf_text"
+    assert r["totals"] == {"qty": 8350, "value": 70013.5, "stated_qty": 8350, "stated_value": 70013.5, "currency": "USD"}
+    assert len(r["lines"]) == 5 and r["validation"]["errors"] == []
+
+def test_dual_read_consensus(client, monkeypatch):
+    """AI-primary: two independent reads must agree; any disagreement -> needs_review with both versions stored."""
+    from app import llm, config as cfg
+    good = {"buyer_name": "Acme", "style_number": "S1", "factory": "F", "department": "D",
+            "pos": [{"po_number": "P9", "ship_date": "01.08.2026", "destination": "X", "stated_total_qty": 30,
+                     "lines": [{"style": "S1", "color": "Navy", "sizes": {"S": 10, "M": 20}, "order_qty": 30}]}]}
+    import copy
+    monkeypatch.setattr(cfg, "llm_provider", lambda: "fake")
+    monkeypatch.setattr(llm, "read_page", lambda **kw: copy.deepcopy(good))
+    j = client.post("/api/extract", files={"file": ("a.txt", b"Acme PO P9 Navy S 10 M 20 total 30 ship 01.08.2026 S1 F D X")}).json()
+    r = j["results"][0]
+    assert r["agreement"]["status"] == "accepted" and r["agreement"]["disagreements"] == []
+    def flaky(**kw):
+        d = copy.deepcopy(good)
+        if "SECOND INDEPENDENT READ" in kw.get("extra", ""):
+            d["pos"][0]["lines"][0]["sizes"]["M"] = 21; d["pos"][0]["lines"][0]["order_qty"] = 31; d["pos"][0]["stated_total_qty"] = 31
+        return d
+    monkeypatch.setattr(llm, "read_page", flaky)
+    j = client.post("/api/extract", files={"file": ("b.txt", b"Acme PO P9 Navy S 10 M 20 21 total 30 31 ship 01.08.2026 S1 F D X")}).json()
+    r = j["results"][0]
+    assert r["agreement"]["status"] == "needs_review"
+    fields = {d["field"] for d in r["agreement"]["disagreements"]}
+    assert any("size[M]" in f for f in fields) and "versions" in r
+    assert j["summary"]["needs_review"] == 1
+    oid = r["order"]["id"]
+    assert "Read A" in client.get(f"/orders/{oid}").text

@@ -36,6 +36,14 @@ def init():
     config.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with conn() as c:
         c.executescript(SCHEMA)
+        cols = {r[1] for r in c.execute("PRAGMA table_info(orders)")}
+        if "review_status" not in cols:
+            c.execute("ALTER TABLE orders ADD COLUMN review_status TEXT")
+            c.execute("ALTER TABLE orders ADD COLUMN review_json TEXT")
+
+def set_review(oid, status, review):
+    with conn() as c:
+        c.execute("UPDATE orders SET review_status=?, review_json=? WHERE id=?", (status, json.dumps(review, default=str), oid))
 
 def add_file(name, kind=None, size=None, sha=None, status="processing", parent_id=None, reason=None):
     with conn() as c:
@@ -81,6 +89,7 @@ def get_order(oid):
         o = dict(o)
         for k in ("sizes", "colors", "warnings"):
             o[k] = json.loads(o[k] or "[]")
+        o["review"] = json.loads(o.get("review_json") or "null"); o.pop("review_json", None); o.pop("raw_json", None)
         o["pos"] = []
         for p in c.execute("SELECT * FROM pos WHERE order_id=? ORDER BY seq", (oid,)):
             p = dict(p)
@@ -90,7 +99,7 @@ def get_order(oid):
 
 def list_orders():
     with conn() as c:
-        return [dict(r) for r in c.execute("""SELECT o.id,o.buyer_name,o.style_number,o.factory,o.status,o.updated_at,f.name file_name,
+        return [dict(r) for r in c.execute("""SELECT o.id,o.review_status,o.buyer_name,o.style_number,o.factory,o.status,o.updated_at,f.name file_name,
           (SELECT GROUP_CONCAT(po_number) FROM pos WHERE order_id=o.id) po_numbers,
           (SELECT COUNT(*) FROM pos WHERE order_id=o.id) n_pos FROM orders o LEFT JOIN files f ON f.id=o.file_id ORDER BY o.id DESC""")]
 
