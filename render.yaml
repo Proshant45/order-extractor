@@ -13,9 +13,15 @@ services:
         value: /var/data
       - key: MAX_UPLOAD_MB
         value: "25"
-      - key: GEMINI_API_KEY
-        sync: false          # set in dashboard, never in repo
-      - key: OPENAI_API_KEY
+      - key: AI_QUEUE
+        value: "1"
+      - key: WORKER_TOKEN
+        sync: false          # same value as worker/.env on the box
+      - key: APP_USERNAME
+        sync: false
+      - key: APP_PASSWORD_HASH
+        sync: false
+      - key: SECRET_KEY
         sync: false
     disk:
       name: data

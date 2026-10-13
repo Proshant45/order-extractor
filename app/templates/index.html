@@ -10,10 +10,15 @@
 {% else %}<tr><td colspan="8" class="muted">No orders yet. Upload a document above.</td></tr>{% endfor %}</tbody></table></section>
 <section class="card"><h3>Recent files</h3><table class="grid"><thead><tr><th>#</th><th>File</th><th>Type</th><th>Status</th><th>Doc type</th><th>Method / reason</th></tr></thead><tbody>
 {% for f in files %}<tr><td>{{f.id}}</td><td>{% if f.parent_id %}↳ {% endif %}{{f.name}}</td><td>{{f.kind or ''}}</td><td>{{f.doc_type or ''}}</td><td><span class="pill {{f.status}}">{{f.status}}</span></td><td>{{f.method or ''}} {{f.reason or ''}}{% if f.order_id %} <a href="/orders/{{f.order_id}}">order {{f.order_id}}</a>{% endif %}</td></tr>{% endfor %}</tbody></table></section>
-<section class="card" id="settings"><h3>Settings: AI reader &amp; API keys</h3>
-<p>AI reader: <b>{{ llm or "not configured" }}</b>. Keys are read only from environment variables on the server, never stored in the app or repo.
-Set <code>GEMINI_API_KEY</code> (preferred) or <code>OPENAI_API_KEY</code> in the Render dashboard (Environment). Optional: <code>GEMINI_MODEL</code>, <code>OPENAI_MODEL</code>.
-Without a key, text-based PDFs/XLSX/CSV/DOCX with a recognised layout still extract deterministically; scanned PDFs and images are skipped with a reason.</p></section>
+<section class="card" id="status"><h3>AI reader status</h3>
+<table class="grid kv"><tr><td>AI reader</td><td>opencode on the local worker box (pulls jobs from this app over HTTPS)</td></tr>
+<tr><td>Read A (text)</td><td>{{ ai.model_a }}</td></tr><tr><td>Read B (text)</td><td>{{ ai.model_b }}</td></tr><tr><td>Images / scans (A and B)</td><td>{{ ai.model_image }}</td></tr>
+<tr><td>Worker</td><td><span id="st_online" class="pill {{ 'done' if ws.online else 'failed' }}">{{ 'online' if ws.online else 'offline' }}</span></td></tr>
+<tr><td>Last heartbeat</td><td id="st_seen">{{ (ws.last_seen_s|string + 's ago') if ws.last_seen_s is not none else 'never' }}</td></tr>
+<tr><td>Queued / running AI jobs</td><td id="st_q">{{ ws.queued }} / {{ ws.leased }}</td></tr>
+<tr><td>Files waiting for the worker</td><td id="st_qf">{{ ai.queued_files }}</td></tr>
+<tr><td>Results served from cache</td><td id="st_c">{{ ai.cached }}</td></tr></table>
+<p class="muted">Every order document is read twice independently and compared field by field; it is auto-accepted only when both reads agree and all totals check out, otherwise it is marked needs review.</p></section>
 <script>
 document.getElementById('up').onsubmit=async e=>{e.preventDefault();const f=document.getElementById('f').files[0];if(!f)return;
 const r=document.getElementById('res');r.innerHTML='<p class="muted">Extracting '+f.name+'…</p>';const fd=new FormData();fd.append('file',f);
@@ -30,5 +35,8 @@ ${S.skipped_reasons.length?'<details open><summary>Skipped / failed reasons</sum
 r.innerHTML='<table class="grid"><tr><th>File</th><th>Status</th><th>Detail</th></tr>'+j.items.map(i=>`<tr><td>${i.name}</td><td><span class="pill ${i.status}">${i.status}</span></td><td>${i.order_id?`<a href="/orders/${i.order_id}">open order ${i.order_id}</a> `:''}${i.reason||''}${(i.warnings||[]).length?' · '+i.warnings.length+' warning(s)':''}</td></tr>`).join('')+'</table>';
 const done=j.items.filter(i=>i.order_id);};
 setInterval(async()=>{try{const w=await (await fetch('/api/ai-status')).json();const e=document.getElementById('aiw');e.className='pill '+(w.online?'done':'failed');
-e.textContent='AI worker '+(w.online?'online':'offline')+(w.last_seen_s!=null?' · seen '+w.last_seen_s+'s ago':'')+' · queue '+w.queued+(w.queued_files?' · '+w.queued_files+' file(s) waiting':'')}catch(e){}},10000);
+e.textContent='AI worker '+(w.online?'online':'offline')+(w.last_seen_s!=null?' · seen '+w.last_seen_s+'s ago':'')+' · queue '+w.queued+(w.queued_files?' · '+w.queued_files+' file(s) waiting':'');
+const o=document.getElementById('st_online');o.className='pill '+(w.online?'done':'failed');o.textContent=w.online?'online':'offline';
+document.getElementById('st_seen').textContent=w.last_seen_s!=null?w.last_seen_s+'s ago':'never';document.getElementById('st_q').textContent=w.queued+' / '+w.leased;
+document.getElementById('st_qf').textContent=w.queued_files;document.getElementById('st_c').textContent=w.cached}catch(e){}},10000);
 </script>{% endblock %}

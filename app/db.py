@@ -220,3 +220,7 @@ def get_batch(bid):
 def queued_files():
     with conn() as c:
         return [dict(r) for r in c.execute("SELECT id,name FROM files WHERE status='queued_ai' ORDER BY id")]
+
+def cached_count():
+    with conn() as c:
+        return c.execute("SELECT COUNT(*) FROM files WHERE status='cached'").fetchone()[0]

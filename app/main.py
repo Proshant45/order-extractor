@@ -332,9 +332,14 @@ async def worker_hb(req: Request):
 def worker_status_api():
     return db.worker_status()
 
+def ai_info():
+    return {"model_a": os.getenv("OPENCODE_MODEL", "opencode/big-pickle"), "model_b": os.getenv("OPENCODE_MODEL_B", "opencode/nemotron-3-ultra-free"),
+            "model_image": os.getenv("OPENCODE_VISION_MODEL", "opencode/mimo-v2.6-flash-free"),
+            "queued_files": len(db.queued_files()), "cached": db.cached_count()}
+
 @app.get("/api/ai-status")
 def ai_status():
-    return {"provider": config.llm_provider(), **db.worker_status(), "queued_files": len(db.queued_files())}
+    return {"provider": config.llm_provider(), **db.worker_status(), **ai_info()}
 
 def _retry_loop():
     """Re-run files that were queued because the AI worker was offline, once it comes back."""
@@ -435,7 +440,7 @@ def api_logs(fid: int):
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
-    return tpl.TemplateResponse(request, "index.html", {"orders": db.list_orders(), "files": db.list_files(), "ws": db.worker_status(),
+    return tpl.TemplateResponse(request, "index.html", {"orders": db.list_orders(), "files": db.list_files(), "ws": db.worker_status(), "ai": ai_info(),
                                 "llm": config.llm_provider(), "max_mb": config.MAX_UPLOAD_MB, "active": "book"})
 
 @app.get("/orders/{oid}", response_class=HTMLResponse)

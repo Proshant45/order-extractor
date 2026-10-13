@@ -57,7 +57,7 @@ def _png_bytes_from_image(path: Path) -> bytes:
 
 def _need_llm(log, what):
     if config.llm_provider() is None:
-        raise Skip(f"{what} needs the AI reader but no GEMINI_API_KEY / OPENAI_API_KEY / EXTRACTOR=opencode is set", need_ai=True)
+        raise Skip(f"{what} needs the AI reader, but the AI worker queue is not enabled on this server", need_ai=True)
     log(f"AI reader ({config.llm_provider()}) for {what}")
 
 def extract_pdf(path: Path, log, ctx=None) -> tuple[dict, str]:

@@ -79,7 +79,7 @@ def _png_of_page1():
 def test_image_path(client):
     res = up(client, "page1.png", _png_of_page1())["items"][0]
     if config.llm_provider() is None:
-        assert res["status"] == "skipped" and "no GEMINI_API_KEY" in res["reason"]
+        assert res["status"] == "skipped" and "needs the AI reader" in res["reason"]
     else:
         assert res["status"] == "done", res
         o = client.get(f"/api/orders/{res['order_id']}").json()

@@ -4,9 +4,9 @@
 <div id="warn" class="warnbox"></div>
 {% set rv = o.review or {} %}
 <section class="card review {{ o.review_status }}"><h3>AI agreement: <span class="pill {{o.review_status}}">{{ (o.review_status or 'unknown')|replace('_',' ') }}</span>
-<small class="muted">{% if rv.models %}A = {{rv.models.a}} · B = {{rv.models.b}}{% endif %}{% if rv.deterministic_vote %} · + deterministic layout parser{% endif %}</small></h3>
+<small class="muted">{% if rv.models %}A = {{rv.models.a}} · B = {{rv.models.b}}{% endif %}{% if rv.deterministic_vote %} · + layout parser cross-check{% endif %}</small></h3>
 {% if rv.reason %}<p>{{rv.reason}}</p>{% endif %}
-{% if rv.disagreements %}<table class="grid"><tr><th>Field</th><th>Source page</th><th>Read A</th><th>Read B</th><th>Layout parser</th></tr>
+{% if rv.disagreements %}<table class="grid"><tr><th>Field</th><th>Source page</th><th>Read A</th><th>Read B</th><th>Layout check</th></tr>
 {% for d in rv.disagreements %}<tr class="bad"><td>{{d.field}}</td><td>{{d.page}}</td><td>{{d.a}}</td><td>{{d.b}}</td><td>{{d.deterministic if d.deterministic is not none else '—'}}</td></tr>{% endfor %}</table>{% endif %}
 {% for e in rv.arithmetic_errors or [] %}<div class="warnbox"><div class="e">✖ {{e}}</div></div>{% endfor %}
 {% if o.review_status == 'needs_review' %}<p class="muted">Form below is prefilled from read A. Correct the differing fields, then Save to mark it reviewed.</p>{% endif %}
