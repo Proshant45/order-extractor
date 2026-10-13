@@ -15,6 +15,7 @@ OWNER = os.getenv("APP_ACCOUNT", "fiazul")   # only jobs uploaded by this app ac
 DRAIN = "--drain" in sys.argv               # exit once the queue stays empty (launched by the cron tick)
 H = {"Authorization": f"Bearer {TOK}"}
 stop = threading.Event()
+busy = [0]; busy_lock = threading.Lock()   # drain mode: idle threads stay while any sibling is still working
 
 def log(*a):
     print(time.strftime("%H:%M:%S"), *a, flush=True)
@@ -54,14 +55,18 @@ def loop(i):
                 r = c.get(URL + "/api/worker/next", params={"worker": f"{NAME}-{i}", "owner": OWNER}, headers=H)
                 if r.status_code == 204:
                     empty += 1
-                    if DRAIN and empty >= int(os.getenv("DRAIN_IDLE_POLLS", "6")):
+                    if DRAIN and empty >= int(os.getenv("DRAIN_IDLE_POLLS", "6")) and busy[0] == 0:
                         return
                     time.sleep(idle); idle = min(idle + 1, 5); continue
                 empty = 0
                 if r.status_code == 401:
                     log("worker token rejected; sleeping 60s"); time.sleep(60); continue
                 r.raise_for_status(); idle = 2
-                handle(c, r.json())
+                with busy_lock: busy[0] += 1
+                try:
+                    handle(c, r.json())
+                finally:
+                    with busy_lock: busy[0] -= 1
             except httpx.HTTPError as e:   # Render cold start / redeploy / network: back off and keep polling
                 log(f"[{i}] poll error {e.__class__.__name__}; retry in 15s"); time.sleep(15)
             except Exception:
