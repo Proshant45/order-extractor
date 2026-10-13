@@ -41,9 +41,14 @@ def norm_size(k) -> str:
 
 class POLine(BaseModel):
     style: Optional[str] = None
-    color: str
+    color: str = ""
     color_code: Optional[str] = None
     sizes: dict[str, int] = Field(default_factory=dict)
+
+    @field_validator("color", mode="before")
+    @classmethod
+    def _color(cls, v):   # AI may return null colour (e.g. colour only as a code); keep the line, warnings flag it
+        return "" if v is None else str(v)
     order_qty: Optional[int] = None
     rate: Optional[float] = None
     net_value: Optional[float] = None
@@ -152,6 +157,9 @@ def warnings_for(order: Order) -> list[str]:
     if not order.pos:
         w.append("No PO found")
     for p in order.pos:
+        for l in p.lines:
+            if not l.color:
+                w.append(f"PO {p.po_number}: line {l.style or ''} {l.color_code or ''} has no colour name")
         tag = f"PO {p.po_number}"
         if not p.ship_date:
             w.append(f"{tag}: missing ship date")

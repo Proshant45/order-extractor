@@ -180,9 +180,15 @@ def _pdf_units(path: Path, log, ctx):
     scanned = [i for i, t in enumerate(texts) if len(t.strip()) < 30]
     ctx["category"] = "pdf_scanned" if len(scanned) > len(texts) / 2 else "pdf_text"
     log(f"PDF pages={len(texts)} scanned_pages={len(scanned)}")
-    if not scanned:   # whole text document in one read so cross-page tables stay together
+    if not scanned:   # text docs: chunks of a few pages so cross-page tables stay together but output isn't truncated
         full = "\n\f".join(texts)
-        yield {"text": full, "page": "1-%d" % len(texts), "det": parsers.parse_sap_po(full) if parsers.looks_like_sap_po(full) else None}
+        det = parsers.parse_sap_po(full) if parsers.looks_like_sap_po(full) else None
+        step = int(os.getenv("AI_PAGES_PER_READ", "4"))
+        if len(full) <= int(os.getenv("AI_CHARS_PER_READ", "20000")) or len(texts) <= step:
+            yield {"text": full, "page": "1-%d" % len(texts), "det": det}
+            return
+        for i in range(0, len(texts), step):
+            yield {"text": "\n\f".join(texts[i:i + step]), "page": "%d-%d" % (i + 1, min(i + step, len(texts))), "det": None}
         return
     doc = pymupdf.open(path)
     try:

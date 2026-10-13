@@ -26,6 +26,8 @@ def handle(c, j):
         f = Path(d) / ("page.png" if j.get("image_b64") else "page.txt")
         f.write_bytes(base64.b64decode(j["image_b64"])) if j.get("image_b64") else f.write_text(j.get("text") or "")
         try:
+            if len(j.get("text") or "") > int(os.getenv("WORKER_MAX_TEXT", "60000")):
+                raise RuntimeError(f"document text too large for one AI read ({len(j['text'])} chars); needs manual review")
             out = opencode_provider.run(j["prompt"] + ("\nThe page image is attached. Output JSON only." if j.get("image_b64") else "\nOutput JSON only."), [f],
                                         j.get("model"), min(int(os.getenv("OPENCODE_TIMEOUT_S", "300")), j.get("lease_s", 360) - 30))
             body = {"id": j["id"], "lease_id": j["lease_id"], "text": out}
