@@ -33,7 +33,19 @@ def _rss_mb(pid: int) -> float:
             pass
     return tot / 1048576
 
+NO_TOOLS = ("\n\nIMPORTANT: do not call any tools. The attached file content is already in this message. "
+            "Answer directly with the JSON only.")
+
 def run(prompt: str, files: list[Path] = (), model: str | None = None, timeout: int | None = None) -> str:
+    """One retry when the model wanders into a tool call and the run ends without an answer."""
+    try:
+        return _run(prompt, files, model, timeout)
+    except RuntimeError as e:
+        if "tool_use" not in str(e) and "tool-calls" not in str(e):
+            raise
+        return _run(prompt + NO_TOOLS, files, model, timeout)
+
+def _run(prompt: str, files: list[Path] = (), model: str | None = None, timeout: int | None = None) -> str:
     exe = binary()
     if not exe:
         raise RuntimeError("opencode binary not found (set OPENCODE_BIN or install in build step)")
@@ -50,7 +62,7 @@ def run(prompt: str, files: list[Path] = (), model: str | None = None, timeout: 
     # NB: Zen free tier returns 403 "only from within OpenCode" if any custom permission config is set; isolation = empty temp dir + minimal env
     p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd=work, env=env,
                          preexec_fn=_limits, text=True)
-    texts, err, deadline = [], None, time.monotonic() + timeout
+    texts, err, deadline, seen = [], None, time.monotonic() + timeout, []
     try:
         import selectors
         sel = selectors.DefaultSelector(); sel.register(p.stdout, selectors.EVENT_READ)
@@ -68,13 +80,15 @@ def run(prompt: str, files: list[Path] = (), model: str | None = None, timeout: 
                 ev = json.loads(line)
             except ValueError:
                 continue
-            t = ev.get("type")
+            t = ev.get("type"); seen.append(t if t != "step_finish" else f"finish:{ev.get('part',{}).get('reason')}")
             if t == "text":
                 texts.append(ev["part"].get("text", ""))
             elif t == "error":
                 err = json.dumps(ev.get("error", ev))[:300]; break
             elif t == "step_finish" and (ev.get("part", {}).get("reason") in ("stop", "end_turn", None)) and texts:
                 break
+            elif t == "step_finish" and ev.get("part", {}).get("reason") in ("stop", "end_turn") and not texts:
+                err = "model finished without text (events: " + ",".join(seen[-8:]) + ")"; break
         else:
             raise TimeoutError(f"opencode timed out after {timeout}s")
     finally:
@@ -84,5 +98,5 @@ def run(prompt: str, files: list[Path] = (), model: str | None = None, timeout: 
     if err:
         raise RuntimeError(f"opencode error: {err}")
     if not texts:
-        raise RuntimeError("opencode returned no text")
+        raise RuntimeError("opencode returned no text (events: " + ",".join(seen[-8:]) + f", rc={p.returncode})")
     return "".join(texts)
