@@ -223,6 +223,7 @@ def extract_ai_primary(path: Path, kind: str, log, ctx) -> tuple[dict, str]:
         return consensus.dual_read(text=u.get("text"), image_png=u.get("image"), det=u["det"], log=log)
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=int(os.getenv("AI_PAGE_PARALLEL", "2"))) as ex:
+        units = list(units)
         results = list(ex.map(_one, units))      # pages read concurrently, merged in page order
     for u, r in zip(units, results):
         used_det = used_det or u["det"] is not None
@@ -235,6 +236,8 @@ def extract_ai_primary(path: Path, kind: str, log, ctx) -> tuple[dict, str]:
         if r["status"] != "accepted":
             status = "needs_review"
     a, b = llm.merge_pages(A), llm.merge_pages(B)
+    if not (a.get("pos") or []):
+        status = "needs_review"; arith.append("no PO / quantity data extracted (never auto-accepted)")
     ctx["consensus"] = {"status": status, "disagreements": dis, "arithmetic_errors": arith, "guard_errors": gerr,
                         "models": ctx.get("models"), "version_a": a, "version_b": b,
                         "deterministic_vote": used_det}
