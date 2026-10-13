@@ -9,7 +9,8 @@ from starlette.concurrency import run_in_threadpool
 from pydantic import ValidationError
 from fastapi import Form
 from fastapi.responses import RedirectResponse
-from . import auth, config, db, extract, zipio
+from . import auth, config, db, extract, llm, zipio
+import shutil, threading, secrets as _sec
 from .schema import Order, warnings_for
 
 logging.basicConfig(level=logging.INFO)
@@ -20,11 +21,18 @@ tpl = Jinja2Templates(directory=BASE / "templates")
 SEM = asyncio.Semaphore(1)   # one extraction at a time keeps RAM flat on a small instance
 
 PUBLIC = {"/healthz", "/login", "/static/app.css"}
+WORKER_PREFIX = "/api/worker/"
 
 @app.middleware("http")
 async def require_login(request: Request, call_next):
     path = request.url.path
     if path in PUBLIC:
+        return await call_next(request)
+    if path.startswith(WORKER_PREFIX):   # box worker: own bearer token, no session
+        tok = os.getenv("WORKER_TOKEN", "")
+        got = request.headers.get("authorization", "")[7:]
+        if len(tok) < 32 or not auth.hmac.compare_digest(tok, got):
+            return JSONResponse({"detail": "bad worker token"}, 401)
         return await call_next(request)
     user = auth.read_session(request.cookies.get(auth.SESSION_COOKIE))
     bearer = request.headers.get("authorization", "")
@@ -61,6 +69,7 @@ def logout():
 @app.on_event("startup")
 def _startup():
     db.init()
+    threading.Thread(target=_retry_loop, daemon=True).start()
     for p in config.TMP_DIR.glob("*"):   # stale temp files from a crash
         p.unlink(missing_ok=True)
 
@@ -78,18 +87,24 @@ async def _stream_to_disk(up: UploadFile) -> tuple[Path, int, str]:
         with open(fd, "wb") as f:
             while chunk := await up.read(config.CHUNK):
                 n += len(chunk)
-                if n > config.MAX_UPLOAD_BYTES:
-                    raise HTTPException(413, f"File exceeds {config.MAX_UPLOAD_MB} MB limit")
+                if n > max(config.MAX_UPLOAD_BYTES, config.MAX_ZIP_MB * 1024 * 1024):
+                    raise HTTPException(413, f"Upload exceeds {config.MAX_ZIP_MB} MB (zip) limit")
                 h.update(chunk); f.write(chunk)
     except BaseException:
         tmp.unlink(missing_ok=True); raise
+    with open(tmp, "rb") as f:
+        is_zip = f.read(4) == b"PK\x03\x04" and Path(up.filename or "").suffix.lower() not in (".xlsx", ".docx")
+    if not is_zip and n > config.MAX_UPLOAD_BYTES:
+        tmp.unlink(missing_ok=True)
+        raise HTTPException(413, f"File exceeds {config.MAX_UPLOAD_MB} MB limit (zips up to {config.MAX_ZIP_MB} MB)")
     return tmp, n, h.hexdigest()
 
 def process_one(path: Path, name: str, parent_id=None, size=None, sha=None, force_ai=False) -> dict:
     """Extract + validate + store one file. Never raises: failures become 'skipped'/'failed' records."""
     fid = db.add_file(name, size=size or path.stat().st_size, sha=sha, parent_id=parent_id)
     lg = lambda m, lvl="info": db.log(fid, m, lvl)
-    ctx = {"category": _cat_from_name(name), "force_ai": force_ai}
+    ctx = {"category": _cat_from_name(name), "force_ai": force_ai, "name": name,
+           "buyer_hint": name.split("/")[1] if name.count("/") >= 2 else (name.split("/")[0] if "/" in name else None)}
     try:
         kind = extract.sniff(path)
         ctx["category"] = {"pdf": "pdf_text", "unknown": "other", "xls": "other", "eml": "other", "text": "other"}.get(kind, kind)
@@ -110,12 +125,24 @@ def process_one(path: Path, name: str, parent_id=None, size=None, sha=None, forc
                     "reason": "single source: deterministic parser only (no AI reader configured)", "models": None}
         db.set_review(oid, cons["status"], cons)
         lg(f"agreement status: {cons['status']}", "info" if cons["status"] == "accepted" else "warn")
-        db.update_file(fid, status="done", method=method)
+        db.update_file(fid, status="done", method=method, doc_type=ctx.get("doc_type"),
+                       meta=json.dumps({"doc_type": ctx.get("doc_type"), "buyer_hint": ctx.get("buyer_hint"), **(ctx.get("refs") or {}),
+                                        "po_numbers": [p.po_number for p in order.pos], "styles": [order.style_number]}))
         lg(f"stored order {oid} ({method})")
         return {"file_id": fid, "name": name, "status": "done", "order_id": oid, "method": method, "warnings": warns,
                 "category": ctx["category"], "used_ai": not method.startswith(("pdf_text", "csv:", "xlsx:", "docx:")),
                 "guard_errors": ctx.get("guard_errors") or [], "attempts": ctx.get("attempts"),
-                "review_status": cons["status"]}
+                "review_status": cons["status"], "doc_type": ctx.get("doc_type")}
+    except extract.NotOrder as e:
+        meta = {"doc_type": str(e), "buyer_hint": ctx.get("buyer_hint"), **(ctx.get("refs") or {})}
+        db.update_file(fid, status="classified", method="classify", doc_type=str(e), meta=json.dumps(meta))
+        lg(f"classified as {e}; not an order document, refs={meta}")
+        return {"file_id": fid, "name": name, "status": "classified", "doc_type": str(e), "category": ctx["category"], "meta": meta}
+    except llm.AIUnavailable as e:
+        qdir = config.DATA_DIR / "queue"; qdir.mkdir(exist_ok=True)
+        shutil.copyfile(path, qdir / f"{fid}{Path(name).suffix[:10]}")
+        lg(f"queued for AI retry: {e}", "warn"); db.update_file(fid, status="queued_ai", reason=str(e))
+        return {"file_id": fid, "name": name, "status": "queued_ai", "reason": str(e), "category": ctx["category"]}
     except extract.Skip as s:
         lg(str(s), "warn"); db.update_file(fid, status="skipped", reason=str(s))
         return {"file_id": fid, "name": name, "status": "skipped", "reason": str(s), "need_ai": s.need_ai, "category": ctx["category"]}
@@ -134,6 +161,10 @@ def _cat_from_name(n):
 
 def summarize(items, upload_name, zipped):
     by = {c: 0 for c in CATS}
+    from .classify import TYPES
+    dt = {t: 0 for t in TYPES}
+    for i in items:
+        if i.get("doc_type"): dt[i["doc_type"]] += 1
     zips = set()
     for i in items:
         parts = i["name"].split("/")
@@ -145,18 +176,23 @@ def summarize(items, upload_name, zipped):
             by[c] += 1
     if zipped:
         by["zip"] = 1 + len(zips)
-    return {"upload": upload_name, "files_received": len(items), "by_format": by,
+    return {"upload": upload_name, "files_received": len(items), "by_format": by, "by_doc_type": dt,
+            "classified_only": sum(i["status"] == "classified" for i in items),
             "extracted_ok": sum(i["status"] == "done" for i in items),
             "skipped": sum(i["status"] == "skipped" for i in items),
             "accepted": sum(i.get("review_status") == "accepted" for i in items),
             "needs_review": sum(i.get("review_status") == "needs_review" for i in items),
             "failed": sum(i["status"] == "failed" for i in items),
+            "queued_ai": sum(i["status"] == "queued_ai" for i in items),
             "need_ai": sum(bool(i.get("need_ai")) for i in items),
             "used_ai": sum(bool(i.get("used_ai")) for i in items),
             "skipped_reasons": [{"name": i["name"], "reason": i.get("reason")} for i in items if i["status"] != "done"]}
 
+EXTRACT_LOCK = threading.Lock()   # one extraction at a time (request, background batch, retry loop)
+
 def process_upload(path: Path, name: str, size: int, sha: str, force_ai=False) -> dict:
-    res = _process_upload(path, name, size, sha, force_ai)
+    with EXTRACT_LOCK:
+        res = _process_upload(path, name, size, sha, force_ai)
     res["summary"] = summarize(res["items"], name, "zip_id" in res)
     log_id = res.get("zip_id") or res["items"][0]["file_id"]
     sm = res["summary"]
@@ -190,26 +226,106 @@ def _process_upload(path: Path, name: str, size: int, sha: str, force_ai=False) 
     db.update_file(zid, status="done", method="zip", reason=f"{done}/{len(items)} entries extracted")
     return {"zip_id": zid, "items": items}
 
-async def _run_upload(file: UploadFile, force_ai: bool):
+def _bg_batch(bid, tmp, name, size, sha, force_ai):
+    try:
+        res = process_upload(tmp, name, size, sha, force_ai)
+        db.save_batch(bid, "done", name, res)
+    except Exception as e:
+        logging.exception("batch failed"); db.save_batch(bid, "failed", name, {"error": f"{e.__class__.__name__}: {e}"})
+    finally:
+        tmp.unlink(missing_ok=True)
+
+async def _run_upload(file: UploadFile, force_ai: bool, wait: bool = True):
+    if not wait:
+        name = _safe_name(file.filename)
+        tmp, size, sha = await _stream_to_disk(file)
+        bid = _sec.token_hex(8); db.save_batch(bid, "processing", name)
+        threading.Thread(target=_bg_batch, args=(bid, tmp, name, size, sha, force_ai), daemon=True).start()
+        return {"batch_id": bid, "status": "processing"}
     name = _safe_name(file.filename)
     tmp, size, sha = await _stream_to_disk(file)
     try:
-        async with SEM:
-            try:
-                res = await asyncio.wait_for(run_in_threadpool(process_upload, tmp, name, size, sha, force_ai), config.EXTRACT_TIMEOUT_S)
-            except asyncio.TimeoutError:
-                raise HTTPException(504, f"Extraction exceeded {config.EXTRACT_TIMEOUT_S}s")
+        try:
+            res = await asyncio.wait_for(run_in_threadpool(process_upload, tmp, name, size, sha, force_ai), config.EXTRACT_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            raise HTTPException(504, f"Extraction exceeded {config.EXTRACT_TIMEOUT_S}s")
     finally:
         tmp.unlink(missing_ok=True)
     return res
 
 @app.post("/api/upload")
-async def upload(file: UploadFile = File(...)):
-    return await _run_upload(file, False)
+async def upload(file: UploadFile = File(...), wait: int = 1):
+    return await _run_upload(file, False, bool(wait))
+
+@app.get("/api/batches/{bid}")
+def api_batch(bid: str, view: str = "upload"):
+    b = db.get_batch(bid)
+    if not b: raise HTTPException(404)
+    if b["status"] == "done" and view == "api":
+        b["result"] = {"summary": b["result"]["summary"], "results": [api_view(i) for i in b["result"]["items"]]}
+    return b
+
+# ---- AI worker pull API (box polls Render over HTTPS) ----
+import base64 as _b64
+
+@app.get("/api/worker/next")
+def worker_next(worker: str = "box"):
+    db.heartbeat(worker)
+    j = db.claim_job(worker)
+    if not j:
+        return JSONResponse(None, 204)
+    if j.get("image") is not None:
+        j["image_b64"] = _b64.b64encode(j.pop("image")).decode()
+    else:
+        j.pop("image", None)
+    return j
+
+@app.post("/api/worker/result")
+async def worker_result(req: Request):
+    b = await req.json()
+    if not isinstance(b.get("id"), int) or not isinstance(b.get("lease_id"), str):
+        raise HTTPException(400, "id and lease_id required")
+    if b.get("error") is None and not isinstance(b.get("text"), str):
+        raise HTTPException(400, "text or error required")
+    st = db.finish_job(b["id"], b["lease_id"], result=b.get("text"), error=b.get("error"))
+    return {"ack": st}
+
+@app.post("/api/worker/heartbeat")
+async def worker_hb(req: Request):
+    b = await req.json(); db.heartbeat(str(b.get("worker", "box"))[:60], str(b.get("info", ""))[:200]); return {"ok": True}
+
+@app.get("/api/worker/status")
+def worker_status_api():
+    return db.worker_status()
+
+@app.get("/api/ai-status")
+def ai_status():
+    return {"provider": config.llm_provider(), **db.worker_status(), "queued_files": len(db.queued_files())}
+
+def _retry_loop():
+    """Re-run files that were queued because the AI worker was offline, once it comes back."""
+    import time
+    while True:
+        time.sleep(int(os.getenv("AI_RETRY_S", "60")))
+        try:
+            if config.llm_provider() != "queue" or not db.worker_online():
+                continue
+            for f in db.queued_files():
+                qp = next((config.DATA_DIR / "queue").glob(f"{f['id']}.*"), None) or (config.DATA_DIR / "queue" / str(f["id"]))
+                if not qp.exists():
+                    db.update_file(f["id"], status="failed", reason="queued copy lost (instance restarted)"); continue
+                with EXTRACT_LOCK:
+                    r = process_one(qp, f["name"])
+                db.update_file(f["id"], status="retried", reason=f"re-processed as file {r['file_id']}: {r['status']}")
+                if r["status"] != "queued_ai":
+                    qp.unlink(missing_ok=True)
+        except Exception:
+            logging.exception("retry loop")
 
 def api_view(item: dict) -> dict:
     """API-style structured response for one processed file."""
-    out = {"status": item["status"], "file": item["name"], "format": item.get("category"), "method": item.get("method"),
+    out = {"status": item["status"], "file": item["name"], "format": item.get("category"), "doc_type": item.get("doc_type"),
+           "meta": item.get("meta"), "method": item.get("method"),
            "reason": item.get("reason"), "attempts": item.get("attempts")}
     if item.get("order_id"):
         o = db.get_order(item["order_id"])
@@ -231,9 +347,11 @@ def api_view(item: dict) -> dict:
     return out
 
 @app.post("/api/extract")
-async def api_extract(file: UploadFile = File(...), reader: str = "auto"):
-    """reader=auto (deterministic first, AI fallback) | ai (force AI reader, deterministic parse kept as guard)."""
-    res = await _run_upload(file, reader == "ai")
+async def api_extract(file: UploadFile = File(...), reader: str = "auto", wait: int = 1):
+    """reader=auto|ai. wait=0 -> {batch_id}; poll GET /api/batches/{id}?view=api."""
+    res = await _run_upload(file, reader == "ai", bool(wait))
+    if not wait:
+        return res
     return {"summary": res["summary"], "results": [api_view(i) for i in res["items"]]}
 
 @app.get("/api/orders")
@@ -260,6 +378,19 @@ async def api_save(oid: int, req: Request):
     db.set_review(oid, "reviewed", rv)
     return {"ok": True, "warnings": w}
 
+@app.get("/api/links")
+def api_links():
+    """Group stored documents by buyer, and link docs that share a PO number or style reference."""
+    files = [f for f in db.list_files(2000) if f.get("meta")]
+    groups = {}
+    for f in files:
+        m = json.loads(f["meta"]); b = m.get("buyer_hint") or "unknown"
+        g = groups.setdefault(b, {"buyer": b, "documents": [], "po_numbers": set(), "styles": set()})
+        g["documents"].append({"file_id": f["id"], "name": f["name"], "doc_type": f.get("doc_type"), "order_id": f.get("order_id"),
+                               "po_refs": m.get("po_numbers") or m.get("po_refs"), "style_refs": m.get("styles") or m.get("style_refs")})
+        g["po_numbers"].update(m.get("po_numbers") or m.get("po_refs") or []); g["styles"].update([s for s in (m.get("styles") or m.get("style_refs") or []) if s])
+    return [dict(g, po_numbers=sorted(g["po_numbers"]), styles=sorted(g["styles"])) for g in groups.values()]
+
 @app.get("/api/files")
 def api_files():
     return db.list_files()
@@ -270,7 +401,7 @@ def api_logs(fid: int):
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
-    return tpl.TemplateResponse(request, "index.html", {"orders": db.list_orders(), "files": db.list_files(),
+    return tpl.TemplateResponse(request, "index.html", {"orders": db.list_orders(), "files": db.list_files(), "ws": db.worker_status(),
                                 "llm": config.llm_provider(), "max_mb": config.MAX_UPLOAD_MB, "active": "book"})
 
 @app.get("/orders/{oid}", response_class=HTMLResponse)

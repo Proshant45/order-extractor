@@ -69,7 +69,7 @@ def compare(a: dict, b: dict, det: dict | None = None) -> list[dict]:
     return out
 
 def models(image: bool) -> tuple[str | None, str | None]:
-    if os.getenv("EXTRACTOR", "").lower() != "opencode":
+    if os.getenv("EXTRACTOR", "").lower() != "opencode" and os.getenv("AI_QUEUE") != "1":
         return None, None   # gemini/openai: same model, different prompt framing
     if image:   # only mimo reads images among the free Zen models (tested); B = same model, different framing
         v = os.getenv("OPENCODE_VISION_MODEL", "opencode/mimo-v2.6-flash-free")
@@ -80,13 +80,15 @@ def dual_read(*, text: str | None = None, image_png: bytes | None = None, det: d
     ma, mb = models(image_png is not None)
     def vote(model, variant, tag):
         cands = [model] + [m for m in os.getenv("OPENCODE_FALLBACK_MODELS", "opencode/step-5-preview-free,opencode/big-pickle").split(",")
-                           if m and m != model] if os.getenv("EXTRACTOR", "").lower() == "opencode" and image_png is None else [model]
+                           if m and m != model] if (os.getenv("EXTRACTOR", "").lower() == "opencode" or os.getenv("AI_QUEUE") == "1") and image_png is None else [model]
         last = None
         for m in cands:
             read = lambda extra, m=m: llm.read_page(text=text, image_png=image_png, extra=variant + extra, model=m)
             try:
                 d, errs, n = guard.ai_extract_with_guard(read, text, lambda msg, lvl="info": log(f"[{tag}:{m}] {msg}", lvl), max_repairs=1, det=det)
                 return {"data": d, "guard_errors": errs, "attempts": n, "model": m or "default"}
+            except llm.AIUnavailable:
+                raise                    # worker down: queue the whole file, don't burn fallbacks
             except RuntimeError as e:   # model unavailable / timed out every attempt -> next free model
                 last = e
         return {"data": None, "guard_errors": [f"vote {tag} failed on all models: {last}"], "attempts": 0, "model": None}

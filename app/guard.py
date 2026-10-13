@@ -79,6 +79,8 @@ def ai_extract_with_guard(read, text: str | None, log, max_repairs: int = 2, det
     for attempt in range(1, max_repairs + 2):
         try:
             d = read(extra)
+        except llm.AIUnavailable:
+            raise
         except Exception as ex:
             log(f"AI attempt {attempt} failed: {ex}", "warn"); errs = [f"AI call failed: {ex}"]; d = None
         else:

@@ -1,5 +1,6 @@
 {% extends "base.html" %}{% block body %}
-<header class="top"><div><h1>Order Book</h1><div class="crumb">Dashboard &gt; <b>Order Book</b></div></div></header>
+<header class="top"><div><h1>Order Book</h1><div class="crumb">Dashboard &gt; <b>Order Book</b></div></div>
+<div id="aiw" class="pill {{ 'done' if ws.online else 'failed' }}">AI worker {{ 'online' if ws.online else 'offline' }}{% if ws.last_seen_s is not none %} · seen {{ws.last_seen_s}}s ago{% endif %} · queue {{ws.queued}}</div></header>
 <section class="card"><h3>Auto Extract from document</h3>
 <form id="up" class="drop"><input type="file" name="file" id="f" accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.xlsx,.csv,.docx,.zip">
 <button class="btn dark" type="submit">Upload &amp; Extract</button><span class="hint">One file at a time (or a .zip). PDF, image, XLSX, CSV, DOCX. Max {{max_mb}} MB.</span></form>
@@ -7,8 +8,8 @@
 <section class="card"><h3>Orders</h3><table class="grid"><thead><tr><th>#</th><th>Buyer</th><th>Style</th><th>Factory</th><th>PO(s)</th><th>Source file</th><th>Status</th><th>Agreement</th><th></th></tr></thead><tbody>
 {% for o in orders %}<tr><td>{{o.id}}</td><td>{{o.buyer_name or ''}}</td><td>{{o.style_number or ''}}</td><td>{{o.factory or ''}}</td><td>{{o.po_numbers or ''}}</td><td>{{o.file_name or ''}}</td><td><span class="pill {{o.status}}">{{o.status}}</span></td><td><span class="pill {{o.review_status}}">{{(o.review_status or "")|replace("_"," ")}}</span></td><td><a class="btn blue sm" href="/orders/{{o.id}}">Open</a></td></tr>
 {% else %}<tr><td colspan="8" class="muted">No orders yet. Upload a document above.</td></tr>{% endfor %}</tbody></table></section>
-<section class="card"><h3>Recent files</h3><table class="grid"><thead><tr><th>#</th><th>File</th><th>Type</th><th>Status</th><th>Method / reason</th></tr></thead><tbody>
-{% for f in files %}<tr><td>{{f.id}}</td><td>{% if f.parent_id %}↳ {% endif %}{{f.name}}</td><td>{{f.kind or ''}}</td><td><span class="pill {{f.status}}">{{f.status}}</span></td><td>{{f.method or ''}} {{f.reason or ''}}{% if f.order_id %} <a href="/orders/{{f.order_id}}">order {{f.order_id}}</a>{% endif %}</td></tr>{% endfor %}</tbody></table></section>
+<section class="card"><h3>Recent files</h3><table class="grid"><thead><tr><th>#</th><th>File</th><th>Type</th><th>Status</th><th>Doc type</th><th>Method / reason</th></tr></thead><tbody>
+{% for f in files %}<tr><td>{{f.id}}</td><td>{% if f.parent_id %}↳ {% endif %}{{f.name}}</td><td>{{f.kind or ''}}</td><td>{{f.doc_type or ''}}</td><td><span class="pill {{f.status}}">{{f.status}}</span></td><td>{{f.method or ''}} {{f.reason or ''}}{% if f.order_id %} <a href="/orders/{{f.order_id}}">order {{f.order_id}}</a>{% endif %}</td></tr>{% endfor %}</tbody></table></section>
 <section class="card" id="settings"><h3>Settings: AI reader &amp; API keys</h3>
 <p>AI reader: <b>{{ llm or "not configured" }}</b>. Keys are read only from environment variables on the server, never stored in the app or repo.
 Set <code>GEMINI_API_KEY</code> (preferred) or <code>OPENAI_API_KEY</code> in the Render dashboard (Environment). Optional: <code>GEMINI_MODEL</code>, <code>OPENAI_MODEL</code>.
@@ -16,14 +17,18 @@ Without a key, text-based PDFs/XLSX/CSV/DOCX with a recognised layout still extr
 <script>
 document.getElementById('up').onsubmit=async e=>{e.preventDefault();const f=document.getElementById('f').files[0];if(!f)return;
 const r=document.getElementById('res');r.innerHTML='<p class="muted">Extracting '+f.name+'…</p>';const fd=new FormData();fd.append('file',f);
-const resp=await fetch('/api/upload',{method:'POST',body:fd});const j=await resp.json().catch(()=>({detail:resp.statusText}));
+const resp=await fetch('/api/upload?wait=0',{method:'POST',body:fd});let j=await resp.json().catch(()=>({detail:resp.statusText}));
+if(resp.ok&&j.batch_id){for(;;){await new Promise(x=>setTimeout(x,3000));const b=await (await fetch('/api/batches/'+j.batch_id)).json();
+ r.innerHTML='<p class="muted">Extracting '+f.name+'… ('+b.status+')</p>';if(b.status!=='processing'){j=b.result||{detail:'failed'};if(b.status==='failed'){r.innerHTML='<p class="err">'+(j.error||'failed')+'</p>';return}break}}}
 if(!resp.ok){r.innerHTML='<p class="err">'+(j.detail||'Upload failed')+'</p>';return}
 const S=j.summary,L={pdf_text:'PDF (text)',pdf_scanned:'PDF (scanned)',image:'Image',xlsx:'XLSX',csv:'CSV',docx:'DOCX',zip:'ZIP',other:'Other'};
 const t=document.createElement('div');t.className='toast';t.id='summary';t.innerHTML=`<button class="x" onclick="this.parentNode.remove()">×</button><h4>Upload summary: ${S.upload}</h4>
 <table><tr><td>Files received</td><td><b>${S.files_received}</b></td></tr>${Object.entries(S.by_format).filter(([k,v])=>v).map(([k,v])=>`<tr><td>· ${L[k]}</td><td>${v}</td></tr>`).join('')}
-<tr><td>Extracted OK</td><td><b style="color:#167a33">${S.extracted_ok}</b></td></tr><tr><td>Skipped</td><td><b style="color:#8a6100">${S.skipped}</b></td></tr>
-<tr><td>Failed</td><td><b style="color:#a12">${S.failed}</b></td></tr><tr><td>Auto-accepted (A=B)</td><td><b style="color:#167a33">${S.accepted}</b></td></tr><tr><td>Needs review</td><td><b style="color:#a12">${S.needs_review}</b></td></tr><tr><td>Need AI reader</td><td>${S.need_ai}</td></tr><tr><td>Read by AI</td><td>${S.used_ai}</td></tr></table>
+${Object.entries(S.by_doc_type||{}).filter(([k,v])=>v).map(([k,v])=>`<tr><td>◦ ${k.replace('_',' ')}</td><td>${v}</td></tr>`).join('')}<tr><td>Classified only (tech pack/BOM/other)</td><td>${S.classified_only||0}</td></tr><tr><td>Extracted OK</td><td><b style="color:#167a33">${S.extracted_ok}</b></td></tr><tr><td>Skipped</td><td><b style="color:#8a6100">${S.skipped}</b></td></tr>
+<tr><td>Queued for AI (worker offline)</td><td>${S.queued_ai||0}</td></tr><tr><td>Failed</td><td><b style="color:#a12">${S.failed}</b></td></tr><tr><td>Auto-accepted (A=B)</td><td><b style="color:#167a33">${S.accepted}</b></td></tr><tr><td>Needs review</td><td><b style="color:#a12">${S.needs_review}</b></td></tr><tr><td>Need AI reader</td><td>${S.need_ai}</td></tr><tr><td>Read by AI</td><td>${S.used_ai}</td></tr></table>
 ${S.skipped_reasons.length?'<details open><summary>Skipped / failed reasons</summary><ul>'+S.skipped_reasons.map(x=>`<li>${x.name}: ${x.reason}</li>`).join('')+'</ul></details>':''}`;document.body.appendChild(t);
 r.innerHTML='<table class="grid"><tr><th>File</th><th>Status</th><th>Detail</th></tr>'+j.items.map(i=>`<tr><td>${i.name}</td><td><span class="pill ${i.status}">${i.status}</span></td><td>${i.order_id?`<a href="/orders/${i.order_id}">open order ${i.order_id}</a> `:''}${i.reason||''}${(i.warnings||[]).length?' · '+i.warnings.length+' warning(s)':''}</td></tr>`).join('')+'</table>';
 const done=j.items.filter(i=>i.order_id);};
+setInterval(async()=>{try{const w=await (await fetch('/api/ai-status')).json();const e=document.getElementById('aiw');e.className='pill '+(w.online?'done':'failed');
+e.textContent='AI worker '+(w.online?'online':'offline')+(w.last_seen_s!=null?' · seen '+w.last_seen_s+'s ago':'')+' · queue '+w.queued+(w.queued_files?' · '+w.queued_files+' file(s) waiting':'')}catch(e){}},10000);
 </script>{% endblock %}

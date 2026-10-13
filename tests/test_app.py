@@ -250,3 +250,53 @@ def test_dual_read_consensus(client, monkeypatch):
     assert j["summary"]["needs_review"] == 1
     oid = r["order"]["id"]
     assert "Read A" in client.get(f"/orders/{oid}").text
+
+def test_worker_queue_pull_model(client, monkeypatch):
+    import threading, time, json as _j, copy
+    from app import db, config as cfg, llm
+    monkeypatch.setenv("WORKER_TOKEN", "w" * 40); monkeypatch.setenv("AI_QUEUE", "1")
+    monkeypatch.setenv("AI_PICKUP_S", "3"); monkeypatch.setenv("AI_JOB_WAIT_S", "60")
+    W = {"Authorization": "Bearer " + "w" * 40}
+    assert client.get("/api/worker/next", headers={"Authorization": "Bearer nope"}).status_code == 401
+    with TestClient(main.app, base_url="https://testserver") as anon:
+        assert anon.get("/api/worker/next", headers=W).status_code == 204   # token auth, no session needed
+    # idempotency + stale lease + lease expiry
+    jid = db.enqueue_job("p", "m", "t", None)
+    j = client.get("/api/worker/next", headers=W).json(); assert j["id"] == jid
+    assert client.post("/api/worker/result", headers=W, json={"id": jid, "lease_id": "bad", "text": "x"}).json()["ack"] == "stale_lease"
+    monkeypatch.setattr(db, "LEASE_S", -1)
+    jid2 = db.enqueue_job("p2", "m", "t", None)
+    a = client.get("/api/worker/next", headers=W).json()    # leases jid2 with an already-expired lease
+    b = client.get("/api/worker/next", headers=W).json()    # expiry re-queues -> claimed again with a new lease
+    assert {a["id"], b["id"]} <= {jid, jid2} and b["lease_id"] != a["lease_id"]
+    monkeypatch.setattr(db, "LEASE_S", 360)
+    for x in (a, b):
+        client.post("/api/worker/result", headers=W, json={"id": x["id"], "lease_id": x["lease_id"], "text": "{}"})
+    r = client.post("/api/worker/result", headers=W, json={"id": b["id"], "lease_id": b["lease_id"], "text": "{}"}).json()
+    assert r["ack"].startswith("already_") or r["ack"] == "stale_lease"
+    # full extraction through a fake worker thread
+    answer = {"buyer_name": "Acme", "style_number": "S1", "factory": "F", "department": "D",
+              "pos": [{"po_number": "P9", "ship_date": "01.08.2026", "destination": "X", "stated_total_qty": 30,
+                       "lines": [{"style": "S1", "color": "Navy", "sizes": {"S": 10, "M": 20}, "order_qty": 30}]}]}
+    stop = threading.Event()
+    def fake_worker():
+        w = TestClient(main.app, base_url="https://testserver")   # no lifespan: startup would wipe TMP_DIR
+        if True:
+            while not stop.is_set():
+                r = w.get("/api/worker/next", headers=W)
+                if r.status_code == 204: time.sleep(0.2); continue
+                jj = r.json(); w.post("/api/worker/result", headers=W, json={"id": jj["id"], "lease_id": jj["lease_id"], "text": _j.dumps(answer)})
+    t = threading.Thread(target=fake_worker, daemon=True); t.start()
+    try:
+        j = client.post("/api/extract", files={"file": ("q.txt", b"Acme PO P9 Navy S 10 M 20 total 30 ship 01.08.2026 S1 F D X")}).json()
+        res = j["results"][0]
+        assert res["status"] == "done" and res["agreement"]["status"] == "accepted", res
+        assert client.get("/api/ai-status").json()["online"] is True
+    finally:
+        stop.set(); t.join(5)
+    # worker offline -> queued_ai, not failed
+    db.heartbeat("box"); 
+    with db.conn() as c: c.execute("UPDATE kv SET v=? WHERE k='worker_hb'", (_j.dumps({"t": 0, "worker": "box"}),))
+    j = client.post("/api/extract", files={"file": ("q2.txt", b"Acme PO P9 Navy S 10 M 20")}).json()
+    assert j["results"][0]["status"] == "queued_ai" and j["summary"]["queued_ai"] == 1
+    assert list((cfg.DATA_DIR / "queue").glob("*"))

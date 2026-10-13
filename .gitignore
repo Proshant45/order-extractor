@@ -8,3 +8,5 @@ screenshots/
 diff.json
 bin/opencode
 .ochome/
+worker/.env
+worker/worker.log

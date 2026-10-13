@@ -235,8 +235,34 @@ def extract_ai_primary(path: Path, kind: str, log, ctx) -> tuple[dict, str]:
     ctx["guard_errors"] = arith + gerr
     return a, f"{kind}_ai_dual"
 
+def preview_text(path: Path, kind: str) -> str | None:
+    """Cheap, bounded text for classification (first 3 pages / first rows)."""
+    try:
+        if kind == "pdf":
+            import pdfplumber
+            out = []
+            with pdfplumber.open(path) as pdf:
+                for pg in pdf.pages[:3]:
+                    out.append(pg.extract_text() or ""); pg.flush_cache()
+            return "\n".join(out)
+        if kind == "xlsx":
+            return "\n".join("\t".join("" if c is None else str(c) for c in r) for _, r in zip(range(150), parsers.iter_xlsx(path)))
+        return (_as_text(path, kind) or "")[:20000]
+    except Exception:
+        return None
+
+class NotOrder(Exception):
+    """Document classified as non-order (tech pack, BOM, other): stored with type + refs, not forced into the order schema."""
+
 def extract_file(path: Path, kind: str, log, ctx=None) -> tuple[dict, str]:
     ctx = ctx if ctx is not None else {}
+    from . import classify
+    pv = preview_text(path, kind)
+    dt, scores = classify.classify(ctx.get("name", path.name), pv)
+    ctx["doc_type"] = dt; ctx["refs"] = classify.refs(pv)
+    log(f"doc type: {dt} {dict((k, v) for k, v in scores.items() if v)}")
+    if dt not in classify.ORDER_TYPES and not ctx.get("force_order") and kind != "image" and (pv or "").strip():
+        raise NotOrder(dt)
     if ai_primary(ctx):
         return extract_ai_primary(path, kind, log, ctx)
     if kind in ("xls", "eml", "text") or (kind == "unknown" and _as_text(path, kind)):

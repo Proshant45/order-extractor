@@ -15,6 +15,11 @@ CREATE TABLE IF NOT EXISTS pos(id INTEGER PRIMARY KEY, order_id INTEGER NOT NULL
   stated_total_qty INTEGER, stated_total_value REAL, currency TEXT, seq INTEGER);
 CREATE TABLE IF NOT EXISTS po_lines(id INTEGER PRIMARY KEY, po_id INTEGER NOT NULL REFERENCES pos(id) ON DELETE CASCADE,
   seq INTEGER, style TEXT, color TEXT NOT NULL, color_code TEXT, sizes TEXT NOT NULL, order_qty INTEGER, rate REAL, net_value REAL);
+CREATE TABLE IF NOT EXISTS ai_jobs(id INTEGER PRIMARY KEY, status TEXT NOT NULL, prompt TEXT, model TEXT, text TEXT, image BLOB,
+  result TEXT, error TEXT, attempts INTEGER DEFAULT 0, lease_id TEXT, lease_until REAL, worker TEXT, created_at TEXT, updated_at TEXT);
+CREATE INDEX IF NOT EXISTS ai_jobs_status ON ai_jobs(status, id);
+CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS batches(id TEXT PRIMARY KEY, status TEXT, name TEXT, result TEXT, created_at TEXT, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS extraction_logs(id INTEGER PRIMARY KEY, file_id INTEGER REFERENCES files(id), level TEXT, message TEXT, created_at TEXT);
 """
 _lock = threading.Lock()
@@ -37,6 +42,10 @@ def init():
     with conn() as c:
         c.executescript(SCHEMA)
         cols = {r[1] for r in c.execute("PRAGMA table_info(orders)")}
+        fcols = {r[1] for r in c.execute("PRAGMA table_info(files)")}
+        if "doc_type" not in fcols:
+            c.execute("ALTER TABLE files ADD COLUMN doc_type TEXT")
+            c.execute("ALTER TABLE files ADD COLUMN meta TEXT")
         if "review_status" not in cols:
             c.execute("ALTER TABLE orders ADD COLUMN review_status TEXT")
             c.execute("ALTER TABLE orders ADD COLUMN review_json TEXT")
@@ -110,3 +119,87 @@ def list_files(limit=50):
 def file_logs(fid):
     with conn() as c:
         return [dict(r) for r in c.execute("SELECT * FROM extraction_logs WHERE file_id=? ORDER BY id", (fid,))]
+
+# ---- AI job queue (pull model) ----
+import secrets as _secrets, time as _time
+LEASE_S = 360
+MAX_JOB_ATTEMPTS = 3
+
+def enqueue_job(prompt, model, text, image):
+    with conn() as c:
+        return c.execute("INSERT INTO ai_jobs(status,prompt,model,text,image,created_at,updated_at) VALUES('queued',?,?,?,?,?,?)",
+                         (prompt, model, text, image, now(), now())).lastrowid
+
+def get_job(jid):
+    with conn() as c:
+        r = c.execute("SELECT id,status,result,error,attempts FROM ai_jobs WHERE id=?", (jid,)).fetchone()
+        return dict(r) if r else None
+
+def cancel_job(jid):
+    with conn() as c:
+        c.execute("UPDATE ai_jobs SET status='cancelled', updated_at=? WHERE id=? AND status IN ('queued','leased')", (now(), jid))
+
+def claim_job(worker):
+    """Atomically lease the oldest queued job (or one whose lease expired). Returns job dict incl. lease_id."""
+    t = _time.time()
+    with conn() as c:
+        c.execute("BEGIN IMMEDIATE")
+        c.execute("UPDATE ai_jobs SET status=CASE WHEN attempts>=? THEN 'error' ELSE 'queued' END, error=CASE WHEN attempts>=? THEN 'lease expired too often' ELSE error END "
+                  "WHERE status='leased' AND lease_until<?", (MAX_JOB_ATTEMPTS, MAX_JOB_ATTEMPTS, t))
+        r = c.execute("SELECT id,prompt,model,text,image FROM ai_jobs WHERE status='queued' ORDER BY id LIMIT 1").fetchone()
+        if not r:
+            return None
+        lease = _secrets.token_hex(12)
+        c.execute("UPDATE ai_jobs SET status='leased', lease_id=?, lease_until=?, attempts=attempts+1, worker=?, updated_at=? WHERE id=?",
+                  (lease, t + LEASE_S, worker, now(), r["id"]))
+        return dict(r, lease_id=lease, lease_s=LEASE_S)
+
+def finish_job(jid, lease_id, result=None, error=None):
+    """Idempotent: a result for an already-finished job or a stale lease is acknowledged and ignored."""
+    with conn() as c:
+        r = c.execute("SELECT status,lease_id,attempts FROM ai_jobs WHERE id=?", (jid,)).fetchone()
+        if not r:
+            return "unknown"
+        if r["status"] in ("done", "error", "cancelled"):
+            return "already_" + r["status"]
+        if r["lease_id"] != lease_id:
+            return "stale_lease"
+        if error is not None:
+            st = "error" if r["attempts"] >= MAX_JOB_ATTEMPTS else "queued"   # retry on another poll
+            c.execute("UPDATE ai_jobs SET status=?, error=?, lease_id=NULL, updated_at=? WHERE id=?", (st, error[:1000], now(), jid))
+            return "requeued" if st == "queued" else "error"
+        c.execute("UPDATE ai_jobs SET status='done', result=?, image=NULL, text=NULL, updated_at=? WHERE id=?", (result, now(), jid))
+        return "ok"
+
+def heartbeat(worker, info=""):
+    with conn() as c:
+        c.execute("INSERT INTO kv(k,v) VALUES('worker_hb',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (json.dumps({"t": _time.time(), "worker": worker, "info": info}),))
+
+def worker_status():
+    with conn() as c:
+        r = c.execute("SELECT v FROM kv WHERE k='worker_hb'").fetchone()
+        q = dict(c.execute("SELECT COUNT(*) FILTER (WHERE status='queued') q, COUNT(*) FILTER (WHERE status='leased') l FROM ai_jobs").fetchone())
+    hb = json.loads(r["v"]) if r else None
+    age = _time.time() - hb["t"] if hb else None
+    return {"online": age is not None and age < 60, "last_seen_s": round(age) if age is not None else None,
+            "worker": hb and hb["worker"], "queued": q["q"], "leased": q["l"]}
+
+def worker_online():
+    return worker_status()["online"]
+
+def save_batch(bid, status, name, result=None):
+    with conn() as c:
+        c.execute("INSERT INTO batches(id,status,name,result,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status, result=excluded.result, updated_at=excluded.updated_at",
+                  (bid, status, name, json.dumps(result) if result is not None else None, now(), now()))
+
+def get_batch(bid):
+    with conn() as c:
+        r = c.execute("SELECT * FROM batches WHERE id=?", (bid,)).fetchone()
+    if not r:
+        return None
+    d = dict(r); d["result"] = json.loads(d["result"]) if d["result"] else None
+    return d
+
+def queued_files():
+    with conn() as c:
+        return [dict(r) for r in c.execute("SELECT id,name FROM files WHERE status='queued_ai' ORDER BY id")]

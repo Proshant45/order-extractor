@@ -26,6 +26,10 @@ def read_page(*, image_png: bytes | None = None, text: str | None = None, extra:
         raise RuntimeError("No LLM key configured (set GEMINI_API_KEY or OPENAI_API_KEY)")
     if text is not None:
         text = text[:60000]
+    if prov == "queue":
+        return _json(queue_read(PROMPT + extra, text=text, image_png=image_png,
+                                 model=model or (os.getenv("OPENCODE_VISION_MODEL", "opencode/mimo-v2.6-flash-free") if image_png
+                                                 else os.getenv("OPENCODE_MODEL", "opencode/big-pickle"))))
     if prov == "opencode":
         import tempfile
         from pathlib import Path
@@ -61,6 +65,29 @@ def read_page(*, image_png: bytes | None = None, text: str | None = None, extra:
                          "messages": [{"role": "user", "content": content}]})
         r.raise_for_status()
         return _json(r.json()["choices"][0]["message"]["content"])
+
+class AIUnavailable(RuntimeError):
+    """AI worker offline / job not picked up in time: file is marked queued_ai and retried later, never failed silently."""
+
+def queue_read(prompt, *, text=None, image_png=None, model=None) -> str:
+    """Pull model: enqueue a job in SQLite; the box worker claims it over HTTPS, runs opencode, posts the result."""
+    import time
+    from . import db
+    jid = db.enqueue_job(prompt, model, text, image_png)
+    wait = int(os.getenv("AI_JOB_WAIT_S", "900"))
+    t0 = time.time()
+    while time.time() - t0 < wait:
+        j = db.get_job(jid)
+        if j["status"] == "done":
+            return j["result"]
+        if j["status"] == "error":
+            raise RuntimeError(f"AI worker error: {j['error']}")
+        if j["status"] == "queued" and time.time() - t0 > int(os.getenv("AI_PICKUP_S", "90")) and not db.worker_online():
+            db.cancel_job(jid)
+            raise AIUnavailable("AI worker offline (no heartbeat); job not picked up")
+        time.sleep(1)
+    db.cancel_job(jid)
+    raise AIUnavailable(f"AI job {jid} not finished within {wait}s")
 
 def merge_pages(pages: list[dict]) -> dict:
     """Merge per-page partial results: first non-null header wins, POs merged by number, lines appended."""
