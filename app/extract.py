@@ -1,6 +1,6 @@
 """File -> structured order. Memory-conscious: page by page, bounded image sizes."""
 from __future__ import annotations
-import io, re, zipfile
+import io, os, re, zipfile
 from pathlib import Path
 from pydantic import ValidationError
 from . import config, llm, parsers
@@ -217,9 +217,15 @@ def extract_ai_primary(path: Path, kind: str, log, ctx) -> tuple[dict, str]:
             det = None
         units = [{"text": txt, "page": "1", "det": det}]
     A, B, dis, arith, gerr, status, used_det = [], [], [], [], [], "accepted", False
-    for u in units:
+    owner = getattr(llm.CURRENT, "owner", None)
+    def _one(u):
+        llm.CURRENT.owner = owner
+        return consensus.dual_read(text=u.get("text"), image_png=u.get("image"), det=u["det"], log=log)
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=int(os.getenv("AI_PAGE_PARALLEL", "2"))) as ex:
+        results = list(ex.map(_one, units))      # pages read concurrently, merged in page order
+    for u, r in zip(units, results):
         used_det = used_det or u["det"] is not None
-        r = consensus.dual_read(text=u.get("text"), image_png=u.get("image"), det=u["det"], log=log)
         A.append(r["votes"]["a"]["data"]); B.append(r["votes"]["b"]["data"] or {})
         dis += [dict(x, page=u["page"]) for x in r["disagreements"]]
         arith += r["arithmetic_errors"]
