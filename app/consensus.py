@@ -78,7 +78,9 @@ def models(image: bool) -> tuple[str | None, str | None]:
 
 def dual_read(*, text: str | None = None, image_png: bytes | None = None, det: dict | None, log) -> dict:
     ma, mb = models(image_png is not None)
+    owner = getattr(llm.CURRENT, "owner", None)
     def vote(model, variant, tag):
+        llm.CURRENT.owner = owner   # thread-local does not cross into the pool threads
         cands = [model] + [m for m in os.getenv("OPENCODE_FALLBACK_MODELS", "opencode/step-5-preview-free,opencode/big-pickle").split(",")
                            if m and m != model] if (os.getenv("EXTRACTOR", "").lower() == "opencode" or os.getenv("AI_QUEUE") == "1") and image_png is None else [model]
         last = None

@@ -76,7 +76,7 @@ def queue_read(prompt, *, text=None, image_png=None, model=None) -> str:
     """Pull model: enqueue a job in SQLite; the box worker claims it over HTTPS, runs opencode, posts the result."""
     import time
     from . import db
-    jid = db.enqueue_job(prompt, model, text, image_png, owner=getattr(CURRENT, "owner", None))
+    jid = db.enqueue_job(prompt, model, text, image_png, owner=getattr(CURRENT, "owner", None) or os.getenv("APP_USERNAME"))
     wait = int(os.getenv("AI_JOB_WAIT_S", "900"))
     t0 = time.time()
     while time.time() - t0 < wait:
