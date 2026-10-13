@@ -125,7 +125,7 @@ def file_logs(fid):
 
 # ---- AI job queue (pull model) ----
 import secrets as _secrets, time as _time
-LEASE_S = 360
+LEASE_S = int(os.getenv("AI_LEASE_S", "720"))  # long text docs can take >5 min on free models
 MAX_JOB_ATTEMPTS = 3
 
 def enqueue_job(prompt, model, text, image, owner=None):
