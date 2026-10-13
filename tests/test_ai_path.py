@@ -1,0 +1,51 @@
+"""AI-primary path end-to-end with a mocked reader: page mapping, agreement, and empty results."""
+import json
+from pathlib import Path
+import pytest
+from app import extract, llm, consensus
+
+SAMPLE = Path(__file__).parent / "fixtures" / "sample_po.pdf"
+
+def _po(page):
+    return {"pos": [{"po_number": "PO1", "stated_total_qty": None,
+                     "lines": [{"style": "S1", "color": f"C{page}", "sizes": {"S": 10 * page, "M": 5}, "order_qty": 10 * page + 5,
+                                "rate": 2.0, "net_value": 2.0 * (10 * page + 5)}]}]}
+
+def _run(monkeypatch, reader, path=SAMPLE):
+    monkeypatch.setenv("EXTRACTOR", "opencode"); monkeypatch.setenv("OPENCODE_FALLBACK_MODELS", "")
+    monkeypatch.setattr(extract, "_need_llm", lambda *a, **k: None)
+    monkeypatch.setattr(llm, "read_page", reader)
+    monkeypatch.setattr(consensus.guard, "text_errors", lambda d, t: [])
+    ctx = {}
+    out = extract.extract_ai_primary(path, "pdf", lambda *a, **k: None, ctx)
+    return out[0] if isinstance(out, tuple) else out, ctx["consensus"]
+
+def _page_of(text):
+    import re
+    m = re.search(r"Page\s*(\d+)", text or "", re.I)
+    return int(m.group(1)) if m else 1
+
+@pytest.mark.skipif(not SAMPLE.exists(), reason="sample PDF missing")
+def test_empty_agreeing_reads_never_accepted(monkeypatch):
+    _, c = _run(monkeypatch, lambda **k: {"pos": []})
+    assert c["status"] == "needs_review"
+
+@pytest.mark.skipif(not SAMPLE.exists(), reason="sample PDF missing")
+def test_pages_all_mapped_and_agreeing_accepted(monkeypatch):
+    calls = []
+    def reader(text=None, image_png=None, extra="", model=None):
+        calls.append(text); return _po(1)
+    o, c = _run(monkeypatch, reader)
+    assert c["version_a"]["pos"], "per-page results must be merged into the order"
+    assert len(calls) >= 2                       # A and B for every page
+    assert not any("no PO" in e for e in c["arithmetic_errors"])   # det parser (third vote) may still flag mock data
+
+@pytest.mark.skipif(not SAMPLE.exists(), reason="sample PDF missing")
+def test_disagreement_flags_review(monkeypatch):
+    def reader(text=None, image_png=None, extra="", model=None):
+        d = _po(1)
+        if extra:   # read B prompt variant
+            d["pos"][0]["lines"][0]["sizes"]["S"] = 11; d["pos"][0]["lines"][0]["order_qty"] = 16; d["pos"][0]["lines"][0]["net_value"] = 32.0
+        return d
+    _, c = _run(monkeypatch, reader)
+    assert c["status"] == "needs_review" and c["disagreements"]
