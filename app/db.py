@@ -1,4 +1,4 @@
-import json, sqlite3, threading
+import json, os, sqlite3, threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from . import config
