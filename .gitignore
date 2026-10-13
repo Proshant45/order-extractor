@@ -10,3 +10,4 @@ bin/opencode
 .ochome/
 worker/.env
 worker/worker.log
+worker/tick.log*

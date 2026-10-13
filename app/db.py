@@ -42,6 +42,9 @@ def init():
     with conn() as c:
         c.executescript(SCHEMA)
         cols = {r[1] for r in c.execute("PRAGMA table_info(orders)")}
+        jcols = {r[1] for r in c.execute("PRAGMA table_info(ai_jobs)")}
+        if "owner" not in jcols:
+            c.execute("ALTER TABLE ai_jobs ADD COLUMN owner TEXT")
         fcols = {r[1] for r in c.execute("PRAGMA table_info(files)")}
         if "doc_type" not in fcols:
             c.execute("ALTER TABLE files ADD COLUMN doc_type TEXT")
@@ -125,10 +128,23 @@ import secrets as _secrets, time as _time
 LEASE_S = 360
 MAX_JOB_ATTEMPTS = 3
 
-def enqueue_job(prompt, model, text, image):
+def enqueue_job(prompt, model, text, image, owner=None):
     with conn() as c:
-        return c.execute("INSERT INTO ai_jobs(status,prompt,model,text,image,created_at,updated_at) VALUES('queued',?,?,?,?,?,?)",
-                         (prompt, model, text, image, now(), now())).lastrowid
+        return c.execute("INSERT INTO ai_jobs(status,prompt,model,text,image,owner,created_at,updated_at) VALUES('queued',?,?,?,?,?,?,?)",
+                         (prompt, model, text, image, owner, now(), now())).lastrowid
+
+def pending_jobs(owner):
+    """Cheap count for the box cron tick: queued jobs (or expired leases) belonging to the given app account."""
+    with conn() as c:
+        return c.execute("SELECT COUNT(*) FROM ai_jobs WHERE owner=? AND (status='queued' OR (status='leased' AND lease_until<?))",
+                         (owner, _time.time())).fetchone()[0]
+
+def cached_result(sha):
+    """Most recent successful extraction of identical bytes."""
+    with conn() as c:
+        r = c.execute("SELECT f.id file_id, f.method, f.doc_type, f.meta, f.kind, f.status, o.id order_id, o.review_status FROM files f "
+                      "LEFT JOIN orders o ON o.file_id=f.id WHERE f.sha256=? AND f.status IN ('done','classified') ORDER BY f.id DESC LIMIT 1", (sha,)).fetchone()
+        return dict(r) if r else None
 
 def get_job(jid):
     with conn() as c:
@@ -139,14 +155,15 @@ def cancel_job(jid):
     with conn() as c:
         c.execute("UPDATE ai_jobs SET status='cancelled', updated_at=? WHERE id=? AND status IN ('queued','leased')", (now(), jid))
 
-def claim_job(worker):
+def claim_job(worker, owner=None):
     """Atomically lease the oldest queued job (or one whose lease expired). Returns job dict incl. lease_id."""
     t = _time.time()
     with conn() as c:
         c.execute("BEGIN IMMEDIATE")
         c.execute("UPDATE ai_jobs SET status=CASE WHEN attempts>=? THEN 'error' ELSE 'queued' END, error=CASE WHEN attempts>=? THEN 'lease expired too often' ELSE error END "
                   "WHERE status='leased' AND lease_until<?", (MAX_JOB_ATTEMPTS, MAX_JOB_ATTEMPTS, t))
-        r = c.execute("SELECT id,prompt,model,text,image FROM ai_jobs WHERE status='queued' ORDER BY id LIMIT 1").fetchone()
+        r = c.execute("SELECT id,prompt,model,text,image FROM ai_jobs WHERE status='queued' AND (? IS NULL OR owner=?) ORDER BY id LIMIT 1",
+                      (owner, owner)).fetchone()
         if not r:
             return None
         lease = _secrets.token_hex(12)

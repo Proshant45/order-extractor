@@ -66,6 +66,9 @@ def read_page(*, image_png: bytes | None = None, text: str | None = None, extra:
         r.raise_for_status()
         return _json(r.json()["choices"][0]["message"]["content"])
 
+import threading as _th
+CURRENT = _th.local()   # .owner = logged-in account that uploaded the file (jobs are tagged with it)
+
 class AIUnavailable(RuntimeError):
     """AI worker offline / job not picked up in time: file is marked queued_ai and retried later, never failed silently."""
 
@@ -73,7 +76,7 @@ def queue_read(prompt, *, text=None, image_png=None, model=None) -> str:
     """Pull model: enqueue a job in SQLite; the box worker claims it over HTTPS, runs opencode, posts the result."""
     import time
     from . import db
-    jid = db.enqueue_job(prompt, model, text, image_png)
+    jid = db.enqueue_job(prompt, model, text, image_png, owner=getattr(CURRENT, "owner", None))
     wait = int(os.getenv("AI_JOB_WAIT_S", "900"))
     t0 = time.time()
     while time.time() - t0 < wait:

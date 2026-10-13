@@ -217,7 +217,8 @@ def test_upload_summary_counts(client):
     logs = client.get(f"/api/files/{j['zip_id']}/logs").json()
     assert any(l["level"] == "summary" and "UPLOAD SUMMARY" in l["message"] for l in logs)
 
-def test_api_extract_shape(client):
+def test_api_extract_shape(client, monkeypatch):
+    monkeypatch.setenv("DISABLE_CACHE", "1")   # fresh extraction (an earlier test edited the cached order)
     j = client.post("/api/extract", files={"file": ("sample_po.pdf", PDF.read_bytes())}).json()
     r = j["results"][0]
     assert r["status"] == "done" and r["format"] == "pdf_text"
@@ -259,15 +260,19 @@ def test_worker_queue_pull_model(client, monkeypatch):
     W = {"Authorization": "Bearer " + "w" * 40}
     assert client.get("/api/worker/next", headers={"Authorization": "Bearer nope"}).status_code == 401
     with TestClient(main.app, base_url="https://testserver") as anon:
-        assert anon.get("/api/worker/next", headers=W).status_code == 204   # token auth, no session needed
+        assert anon.get("/api/worker/next", params={"owner": "tester"}, headers=W).status_code == 204   # token auth, no session needed
+        assert anon.get("/api/worker/pending", params={"owner": "tester"}, headers=W).json()["pending"] == 0
+        db.enqueue_job("x", "m", "t", None, owner="someone-else")
+        assert anon.get("/api/worker/pending", params={"owner": "someone-else"}, headers=W).json()["pending"] == 0   # other owners ignored
+        assert anon.get("/api/worker/next", params={"owner": "someone-else"}, headers=W).status_code == 204
     # idempotency + stale lease + lease expiry
-    jid = db.enqueue_job("p", "m", "t", None)
-    j = client.get("/api/worker/next", headers=W).json(); assert j["id"] == jid
+    jid = db.enqueue_job("p", "m", "t", None, owner="tester")
+    j = client.get("/api/worker/next", params={"owner": "tester"}, headers=W).json(); assert j["id"] == jid
     assert client.post("/api/worker/result", headers=W, json={"id": jid, "lease_id": "bad", "text": "x"}).json()["ack"] == "stale_lease"
     monkeypatch.setattr(db, "LEASE_S", -1)
-    jid2 = db.enqueue_job("p2", "m", "t", None)
-    a = client.get("/api/worker/next", headers=W).json()    # leases jid2 with an already-expired lease
-    b = client.get("/api/worker/next", headers=W).json()    # expiry re-queues -> claimed again with a new lease
+    jid2 = db.enqueue_job("p2", "m", "t", None, owner="tester")
+    a = client.get("/api/worker/next", params={"owner": "tester"}, headers=W).json()    # leases jid2 with an already-expired lease
+    b = client.get("/api/worker/next", params={"owner": "tester"}, headers=W).json()    # expiry re-queues -> claimed again with a new lease
     assert {a["id"], b["id"]} <= {jid, jid2} and b["lease_id"] != a["lease_id"]
     monkeypatch.setattr(db, "LEASE_S", 360)
     for x in (a, b):
@@ -283,7 +288,7 @@ def test_worker_queue_pull_model(client, monkeypatch):
         w = TestClient(main.app, base_url="https://testserver")   # no lifespan: startup would wipe TMP_DIR
         if True:
             while not stop.is_set():
-                r = w.get("/api/worker/next", headers=W)
+                r = w.get("/api/worker/next", params={"owner": "tester"}, headers=W)
                 if r.status_code == 204: time.sleep(0.2); continue
                 jj = r.json(); w.post("/api/worker/result", headers=W, json={"id": jj["id"], "lease_id": jj["lease_id"], "text": _j.dumps(answer)})
     t = threading.Thread(target=fake_worker, daemon=True); t.start()
@@ -300,3 +305,11 @@ def test_worker_queue_pull_model(client, monkeypatch):
     j = client.post("/api/extract", files={"file": ("q2.txt", b"Acme PO P9 Navy S 10 M 20")}).json()
     assert j["results"][0]["status"] == "queued_ai" and j["summary"]["queued_ai"] == 1
     assert list((cfg.DATA_DIR / "queue").glob("*"))
+
+
+def test_sha_cache(client):
+    j1 = client.post("/api/extract", files={"file": ("again.pdf", PDF.read_bytes())}).json()["results"][0]
+    assert j1["cached"] is True and j1["cached_from"] and j1["order"]["id"]
+    data = _zip([("a/x1.pdf", PDF.read_bytes()), ("b/x2.pdf", PDF.read_bytes())])
+    j = client.post("/api/extract", files={"file": ("dup.zip", data)}).json()
+    assert j["summary"]["cached"] == 2 and all(r["cached"] for r in j["results"])

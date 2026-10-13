@@ -11,6 +11,8 @@ from app import opencode_provider
 
 URL = os.environ["APP_URL"].rstrip("/"); TOK = os.environ["WORKER_TOKEN"]
 NAME = os.getenv("WORKER_NAME", "box"); THREADS = int(os.getenv("WORKER_THREADS", "2"))
+OWNER = os.getenv("APP_ACCOUNT", "fiazul")   # only jobs uploaded by this app account
+DRAIN = "--drain" in sys.argv               # exit once the queue stays empty (launched by the cron tick)
 H = {"Authorization": f"Bearer {TOK}"}
 stop = threading.Event()
 
@@ -38,12 +40,16 @@ def handle(c, j):
 
 def loop(i):
     with httpx.Client(timeout=httpx.Timeout(60, connect=20), follow_redirects=False) as c:
-        idle = 2
+        idle, empty = 2, 0
         while not stop.is_set():
             try:
-                r = c.get(URL + "/api/worker/next", params={"worker": f"{NAME}-{i}"}, headers=H)
+                r = c.get(URL + "/api/worker/next", params={"worker": f"{NAME}-{i}", "owner": OWNER}, headers=H)
                 if r.status_code == 204:
+                    empty += 1
+                    if DRAIN and empty >= int(os.getenv("DRAIN_IDLE_POLLS", "6")):
+                        return
                     time.sleep(idle); idle = min(idle + 1, 5); continue
+                empty = 0
                 if r.status_code == 401:
                     log("worker token rejected; sleeping 60s"); time.sleep(60); continue
                 r.raise_for_status(); idle = 2
@@ -60,7 +66,8 @@ if __name__ == "__main__":
     ts = [threading.Thread(target=loop, args=(i,), daemon=True) for i in range(THREADS)]
     [t.start() for t in ts]
     try:
-        while True:
-            time.sleep(3600)
+        while any(t.is_alive() for t in ts):
+            time.sleep(1)
     except KeyboardInterrupt:
         stop.set()
+    log("worker exiting (queue drained)" if DRAIN else "worker exiting")

@@ -99,8 +99,29 @@ async def _stream_to_disk(up: UploadFile) -> tuple[Path, int, str]:
         raise HTTPException(413, f"File exceeds {config.MAX_UPLOAD_MB} MB limit (zips up to {config.MAX_ZIP_MB} MB)")
     return tmp, n, h.hexdigest()
 
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(config.CHUNK):
+            h.update(chunk)
+    return h.hexdigest()
+
 def process_one(path: Path, name: str, parent_id=None, size=None, sha=None, force_ai=False) -> dict:
     """Extract + validate + store one file. Never raises: failures become 'skipped'/'failed' records."""
+    sha = sha or _sha256(path)
+    hit = None if os.getenv("DISABLE_CACHE") == "1" else db.cached_result(sha)
+    if hit:   # identical bytes already extracted: serve stored result, no AI job
+        fid = db.add_file(name, kind=hit["kind"], size=size or path.stat().st_size, sha=sha, parent_id=parent_id, status="cached",
+                          reason=f"identical to file {hit['file_id']}")
+        db.update_file(fid, method="cache:" + (hit["method"] or ""), doc_type=hit["doc_type"], meta=hit["meta"])
+        db.log(fid, f"cache hit (sha256 {sha[:12]}): served result of file {hit['file_id']}")
+        cat = {"pdf": "pdf_text", "unknown": "other", "xls": "other", "eml": "other", "text": "other"}.get(hit["kind"], hit["kind"] or "other")
+        out = {"file_id": fid, "name": name, "status": "done" if hit["order_id"] else "classified", "cached": True,
+               "cached_from": hit["file_id"], "order_id": hit["order_id"], "method": "cache:" + (hit["method"] or ""),
+               "doc_type": hit["doc_type"], "category": cat, "review_status": hit["review_status"], "warnings": []}
+        if hit["meta"]:
+            out["meta"] = json.loads(hit["meta"])
+        return out
     fid = db.add_file(name, size=size or path.stat().st_size, sha=sha, parent_id=parent_id)
     lg = lambda m, lvl="info": db.log(fid, m, lvl)
     ctx = {"category": _cat_from_name(name), "force_ai": force_ai, "name": name,
@@ -178,6 +199,7 @@ def summarize(items, upload_name, zipped):
         by["zip"] = 1 + len(zips)
     return {"upload": upload_name, "files_received": len(items), "by_format": by, "by_doc_type": dt,
             "classified_only": sum(i["status"] == "classified" for i in items),
+            "cached": sum(bool(i.get("cached")) for i in items),
             "extracted_ok": sum(i["status"] == "done" for i in items),
             "skipped": sum(i["status"] == "skipped" for i in items),
             "accepted": sum(i.get("review_status") == "accepted" for i in items),
@@ -190,7 +212,8 @@ def summarize(items, upload_name, zipped):
 
 EXTRACT_LOCK = threading.Lock()   # one extraction at a time (request, background batch, retry loop)
 
-def process_upload(path: Path, name: str, size: int, sha: str, force_ai=False) -> dict:
+def process_upload(path: Path, name: str, size: int, sha: str, force_ai=False, owner=None) -> dict:
+    llm.CURRENT.owner = owner
     with EXTRACT_LOCK:
         res = _process_upload(path, name, size, sha, force_ai)
     res["summary"] = summarize(res["items"], name, "zip_id" in res)
@@ -226,27 +249,27 @@ def _process_upload(path: Path, name: str, size: int, sha: str, force_ai=False) 
     db.update_file(zid, status="done", method="zip", reason=f"{done}/{len(items)} entries extracted")
     return {"zip_id": zid, "items": items}
 
-def _bg_batch(bid, tmp, name, size, sha, force_ai):
+def _bg_batch(bid, tmp, name, size, sha, force_ai, owner=None):
     try:
-        res = process_upload(tmp, name, size, sha, force_ai)
+        res = process_upload(tmp, name, size, sha, force_ai, owner)
         db.save_batch(bid, "done", name, res)
     except Exception as e:
         logging.exception("batch failed"); db.save_batch(bid, "failed", name, {"error": f"{e.__class__.__name__}: {e}"})
     finally:
         tmp.unlink(missing_ok=True)
 
-async def _run_upload(file: UploadFile, force_ai: bool, wait: bool = True):
+async def _run_upload(file: UploadFile, force_ai: bool, wait: bool = True, owner=None):
     if not wait:
         name = _safe_name(file.filename)
         tmp, size, sha = await _stream_to_disk(file)
         bid = _sec.token_hex(8); db.save_batch(bid, "processing", name)
-        threading.Thread(target=_bg_batch, args=(bid, tmp, name, size, sha, force_ai), daemon=True).start()
+        threading.Thread(target=_bg_batch, args=(bid, tmp, name, size, sha, force_ai, owner), daemon=True).start()
         return {"batch_id": bid, "status": "processing"}
     name = _safe_name(file.filename)
     tmp, size, sha = await _stream_to_disk(file)
     try:
         try:
-            res = await asyncio.wait_for(run_in_threadpool(process_upload, tmp, name, size, sha, force_ai), config.EXTRACT_TIMEOUT_S)
+            res = await asyncio.wait_for(run_in_threadpool(process_upload, tmp, name, size, sha, force_ai, owner), config.EXTRACT_TIMEOUT_S)
         except asyncio.TimeoutError:
             raise HTTPException(504, f"Extraction exceeded {config.EXTRACT_TIMEOUT_S}s")
     finally:
@@ -254,8 +277,8 @@ async def _run_upload(file: UploadFile, force_ai: bool, wait: bool = True):
     return res
 
 @app.post("/api/upload")
-async def upload(file: UploadFile = File(...), wait: int = 1):
-    return await _run_upload(file, False, bool(wait))
+async def upload(request: Request, file: UploadFile = File(...), wait: int = 1):
+    return await _run_upload(file, False, bool(wait), getattr(request.state, "user", None))
 
 @app.get("/api/batches/{bid}")
 def api_batch(bid: str, view: str = "upload"):
@@ -268,10 +291,21 @@ def api_batch(bid: str, view: str = "upload"):
 # ---- AI worker pull API (box polls Render over HTTPS) ----
 import base64 as _b64
 
+@app.get("/api/worker/pending")
+def worker_pending(owner: str = ""):
+    """Cheap check for the box cron tick. Only counts jobs uploaded by the configured app account."""
+    acct = os.getenv("APP_USERNAME", "")
+    if owner != acct:
+        return {"pending": 0, "owner": owner, "note": "only jobs of the app account are served"}
+    return {"pending": db.pending_jobs(acct)}
+
 @app.get("/api/worker/next")
-def worker_next(worker: str = "box"):
+def worker_next(worker: str = "box", owner: str = ""):
     db.heartbeat(worker)
-    j = db.claim_job(worker)
+    acct = os.getenv("APP_USERNAME", "")
+    if owner != acct:
+        return JSONResponse(None, 204)
+    j = db.claim_job(worker, acct)
     if not j:
         return JSONResponse(None, 204)
     if j.get("image") is not None:
@@ -325,7 +359,7 @@ def _retry_loop():
 def api_view(item: dict) -> dict:
     """API-style structured response for one processed file."""
     out = {"status": item["status"], "file": item["name"], "format": item.get("category"), "doc_type": item.get("doc_type"),
-           "meta": item.get("meta"), "method": item.get("method"),
+           "meta": item.get("meta"), "method": item.get("method"), "cached": bool(item.get("cached")), "cached_from": item.get("cached_from"),
            "reason": item.get("reason"), "attempts": item.get("attempts")}
     if item.get("order_id"):
         o = db.get_order(item["order_id"])
@@ -347,9 +381,9 @@ def api_view(item: dict) -> dict:
     return out
 
 @app.post("/api/extract")
-async def api_extract(file: UploadFile = File(...), reader: str = "auto", wait: int = 1):
+async def api_extract(request: Request, file: UploadFile = File(...), reader: str = "auto", wait: int = 1):
     """reader=auto|ai. wait=0 -> {batch_id}; poll GET /api/batches/{id}?view=api."""
-    res = await _run_upload(file, reader == "ai", bool(wait))
+    res = await _run_upload(file, reader == "ai", bool(wait), getattr(request.state, "user", None))
     if not wait:
         return res
     return {"summary": res["summary"], "results": [api_view(i) for i in res["items"]]}
