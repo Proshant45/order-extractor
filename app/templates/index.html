@@ -1,0 +1,23 @@
+{% extends "base.html" %}{% block body %}
+<header class="top"><div><h1>Order Book</h1><div class="crumb">Dashboard &gt; <b>Order Book</b></div></div></header>
+<section class="card"><h3>Auto Extract from document</h3>
+<form id="up" class="drop"><input type="file" name="file" id="f" accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.xlsx,.csv,.docx,.zip">
+<button class="btn dark" type="submit">Upload &amp; Extract</button><span class="hint">One file at a time (or a .zip). PDF, image, XLSX, CSV, DOCX. Max {{max_mb}} MB.</span></form>
+<div id="res"></div></section>
+<section class="card"><h3>Orders</h3><table class="grid"><thead><tr><th>#</th><th>Buyer</th><th>Style</th><th>Factory</th><th>PO(s)</th><th>Source file</th><th>Status</th><th></th></tr></thead><tbody>
+{% for o in orders %}<tr><td>{{o.id}}</td><td>{{o.buyer_name or ''}}</td><td>{{o.style_number or ''}}</td><td>{{o.factory or ''}}</td><td>{{o.po_numbers or ''}}</td><td>{{o.file_name or ''}}</td><td><span class="pill {{o.status}}">{{o.status}}</span></td><td><a class="btn blue sm" href="/orders/{{o.id}}">Open</a></td></tr>
+{% else %}<tr><td colspan="8" class="muted">No orders yet. Upload a document above.</td></tr>{% endfor %}</tbody></table></section>
+<section class="card"><h3>Recent files</h3><table class="grid"><thead><tr><th>#</th><th>File</th><th>Type</th><th>Status</th><th>Method / reason</th></tr></thead><tbody>
+{% for f in files %}<tr><td>{{f.id}}</td><td>{% if f.parent_id %}↳ {% endif %}{{f.name}}</td><td>{{f.kind or ''}}</td><td><span class="pill {{f.status}}">{{f.status}}</span></td><td>{{f.method or ''}} {{f.reason or ''}}{% if f.order_id %} <a href="/orders/{{f.order_id}}">order {{f.order_id}}</a>{% endif %}</td></tr>{% endfor %}</tbody></table></section>
+<section class="card" id="settings"><h3>Settings: AI reader &amp; API keys</h3>
+<p>AI reader: <b>{{ llm or "not configured" }}</b>. Keys are read only from environment variables on the server, never stored in the app or repo.
+Set <code>GEMINI_API_KEY</code> (preferred) or <code>OPENAI_API_KEY</code> in the Render dashboard (Environment). Optional: <code>GEMINI_MODEL</code>, <code>OPENAI_MODEL</code>.
+Without a key, text-based PDFs/XLSX/CSV/DOCX with a recognised layout still extract deterministically; scanned PDFs and images are skipped with a reason.</p></section>
+<script>
+document.getElementById('up').onsubmit=async e=>{e.preventDefault();const f=document.getElementById('f').files[0];if(!f)return;
+const r=document.getElementById('res');r.innerHTML='<p class="muted">Extracting '+f.name+'…</p>';const fd=new FormData();fd.append('file',f);
+const resp=await fetch('/api/upload',{method:'POST',body:fd});const j=await resp.json().catch(()=>({detail:resp.statusText}));
+if(!resp.ok){r.innerHTML='<p class="err">'+(j.detail||'Upload failed')+'</p>';return}
+r.innerHTML='<table class="grid"><tr><th>File</th><th>Status</th><th>Detail</th></tr>'+j.items.map(i=>`<tr><td>${i.name}</td><td><span class="pill ${i.status}">${i.status}</span></td><td>${i.order_id?`<a href="/orders/${i.order_id}">open order ${i.order_id}</a> `:''}${i.reason||''}${(i.warnings||[]).length?' · '+i.warnings.length+' warning(s)':''}</td></tr>`).join('')+'</table>';
+const done=j.items.filter(i=>i.order_id);if(j.items.length==1&&done.length==1)location.href='/orders/'+done[0].order_id;};
+</script>{% endblock %}

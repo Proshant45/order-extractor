@@ -1,0 +1,17 @@
+{% extends "base.html" %}{% block body %}
+<header class="top"><div><h1>New Order</h1><div class="crumb">Dashboard &gt; Order Book &gt; Add Order &gt; <b>New Order</b></div></div>
+<div><button class="btn ghost" onclick="save('draft')">💾 Save as Draft</button> <button class="btn dark" onclick="save('saved')">Add Now</button></div></header>
+<div id="warn" class="warnbox"></div>
+<section class="card"><div class="row hdr">
+<label>Buyer Name *<input id="buyer_name"></label><label>Brand *<input id="brand" placeholder="Select a brand"></label>
+<label>Style Number *<input id="style_number"></label><label>Factory *<input id="factory"></label>
+<label>Planned Line *<input id="planned_line" type="number" min="1"></label><label>FOB *<input id="fob" placeholder="Enter FOB"></label>
+<label>SMV<input id="smv" placeholder="Enter SMV"></label><label>CM<input id="cm" placeholder="Enter CM"></label>
+<label>Style Image *<div class="upl">⤒ Upload style image<small>Accepted file type: JPEG, PNG</small></div></label></div></section>
+<section class="card"><div class="row three"><label>Department *<input id="department"></label><label>Size *<input id="sizes" title="comma separated"></label>
+<label>Color *<input id="colors" title="comma separated"></label><div class="acts"><button class="btn dark" onclick="addPO()">Add PO Breakdown ＋</button>
+<span class="btn blue">Auto Extract ✓ <small>{{o.method or ''}}</small></span></div></div>
+<p class="muted">Source: {{o.file_name or 'manual'}}</p></section>
+<div id="pos"></div>
+<div class="foot"><button class="btn ghost" onclick="save('draft')">💾 Save as Draft</button> <button class="btn dark" onclick="save('saved')">Add Now</button></div>
+<script>const O={{ o|tojson }};</script><script src="/static/order.js"></script>{% endblock %}

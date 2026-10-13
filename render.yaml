@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: order-extractor
+    runtime: python
+    plan: starter            # persistent disks need a paid instance; on free, SQLite resets on every deploy/restart
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1 --timeout-keep-alive 30
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      - key: DATA_DIR
+        value: /var/data
+      - key: MAX_UPLOAD_MB
+        value: "25"
+      - key: GEMINI_API_KEY
+        sync: false          # set in dashboard, never in repo
+      - key: OPENAI_API_KEY
+        sync: false
+    disk:
+      name: data
+      mountPath: /var/data
+      sizeGB: 1
+  - type: cron
+    name: order-extractor-keepalive
+    runtime: python
+    plan: starter
+    schedule: "*/10 * * * *"
+    buildCommand: "true"
+    startCommand: python -c "import urllib.request,os;urllib.request.urlopen(os.environ['APP_URL']+'/healthz',timeout=30).read()"
+    envVars:
+      - key: APP_URL
+        sync: false

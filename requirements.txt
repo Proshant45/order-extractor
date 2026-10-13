@@ -1,0 +1,11 @@
+fastapi==0.*
+uvicorn[standard]
+jinja2
+python-multipart
+pdfplumber
+pymupdf
+pydantic>=2
+openpyxl
+python-docx
+pillow
+httpx
