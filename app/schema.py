@@ -1,4 +1,5 @@
 from __future__ import annotations
+import re
 from datetime import date, datetime
 from typing import Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -26,6 +27,18 @@ def to_num(v):
     s = str(v).replace(",", "").strip()
     return float(s)
 
+SIZE_ALIASES = {"SMALL": "S", "MEDIUM": "M", "MED": "M", "LARGE": "L", "XLARGE": "XL", "EXTRALARGE": "XL", "XSMALL": "XS",
+                "EXTRASMALL": "XS", "XXLARGE": "XXL", "2XL": "XXL", "XXXL": "3XL", "SM": "S", "LG": "L", "MD": "M"}
+
+def norm_size(k) -> str:
+    s = str(k).strip()
+    u = re.sub(r"[\s\-_.]", "", s.upper())
+    if u in SIZE_ALIASES:
+        return SIZE_ALIASES[u]
+    if re.fullmatch(r"\d+(\.\d+)?", s):
+        return s.rstrip("0").rstrip(".") if "." in s else s
+    return s.upper() if len(s) <= 4 else s
+
 class POLine(BaseModel):
     style: Optional[str] = None
     color: str
@@ -45,7 +58,7 @@ class POLine(BaseModel):
                 continue
             if n < 0 or n != int(n):
                 raise ValueError(f"size {k}: quantity must be a non-negative whole number, got {q}")
-            out[str(k)] = int(n)
+            out[norm_size(k)] = out.get(norm_size(k), 0) + int(n)
         return out
 
     @field_validator("order_qty", mode="before")

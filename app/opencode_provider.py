@@ -38,7 +38,7 @@ def run(prompt: str, files: list[Path] = (), model: str | None = None, timeout: 
     if not exe:
         raise RuntimeError("opencode binary not found (set OPENCODE_BIN or install in build step)")
     model = model or os.getenv("OPENCODE_MODEL", "opencode/mimo-v2.6-flash-free")
-    timeout = timeout or int(os.getenv("OPENCODE_TIMEOUT_S", "180"))
+    timeout = timeout or int(os.getenv("OPENCODE_TIMEOUT_S", "300"))
     work = tempfile.mkdtemp(prefix="oc_")
     cmd = [exe, "run", "-m", model, "--format", "json", "--dir", work, prompt]
     for f in files:

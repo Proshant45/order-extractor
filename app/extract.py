@@ -220,7 +220,7 @@ def extract_ai_primary(path: Path, kind: str, log, ctx) -> tuple[dict, str]:
     for u in units:
         used_det = used_det or u["det"] is not None
         r = consensus.dual_read(text=u.get("text"), image_png=u.get("image"), det=u["det"], log=log)
-        A.append(r["votes"]["a"]["data"]); B.append(r["votes"]["b"]["data"])
+        A.append(r["votes"]["a"]["data"]); B.append(r["votes"]["b"]["data"] or {})
         dis += [dict(x, page=u["page"]) for x in r["disagreements"]]
         arith += r["arithmetic_errors"]
         gerr += [f"[{v}] {e}" for v in ("a", "b") for e in r["votes"][v]["guard_errors"]]

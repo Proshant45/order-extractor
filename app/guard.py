@@ -60,9 +60,11 @@ def compare_to_deterministic(ai: dict, det: dict) -> list[str]:
         if not g:
             e.append(f"line color {l.get('color')!r} not found by deterministic parser"); continue
         if _norm(l.get("style")) != _norm(g.get("style")):
-            e.append(f"{l.get('color')}: style should be {g['style']!r} (base style code without colour/size suffix), got {l.get('style')!r}")
-        a = {str(k): int(float(v)) for k, v in (l.get("sizes") or {}).items()}
-        if a != dict(g["sizes"]):
+            if g.get("style"):
+                e.append(f"{l.get('color')}: style should be {g['style']!r} (base style code without colour/size suffix), got {l.get('style')!r}")
+        from .schema import norm_size
+        a = {norm_size(k): int(float(v)) for k, v in (l.get("sizes") or {}).items()}
+        if a != {norm_size(k): int(v) for k, v in g["sizes"].items()}:
             e.append(f"{l.get('style')}/{l.get('color')} sizes {a} != {dict(g['sizes'])}")
         for f in ("rate", "net_value", "order_qty"):
             if l.get(f) is not None and g.get(f) is not None and abs(float(l[f]) - float(g[f])) > 0.001:

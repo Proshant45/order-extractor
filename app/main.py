@@ -179,7 +179,8 @@ def _process_upload(path: Path, name: str, size: int, sha: str, force_ai=False) 
             fid = db.add_file(ename, status="skipped", parent_id=zid, reason=reason)
             db.log(fid, reason, "warn")
             items.append({"file_id": fid, "name": ename, "status": "skipped", "reason": reason,
-                          "category": "zip" if reason.startswith(("nested zip", "corrupt zip")) else _cat_from_name(ename)})
+                          "category": "zip" if reason.startswith(("nested zip", "corrupt zip")) else
+                          ("other" if zipio.junk_reason(ename) else _cat_from_name(ename))})
             continue
         try:
             items.append(process_one(tmp, ename, parent_id=zid, force_ai=force_ai))

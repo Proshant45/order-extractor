@@ -47,8 +47,9 @@ def flatten(d: dict) -> dict[str, object]:
             f[f"{lb}.style"] = _s(l.get("style")) or None
             for k in ("order_qty", "rate", "net_value"):
                 f[f"{lb}.{k}"] = _n(l.get(k))
+            from .schema import norm_size
             for sz, q in (l.get("sizes") or {}).items():
-                f[f"{lb}.size[{_s(sz)}]"] = _n(q)
+                f[f"{lb}.size[{norm_size(sz)}]"] = _n(q)
     return f
 
 def compare(a: dict, b: dict, det: dict | None = None) -> list[dict]:
@@ -78,14 +79,26 @@ def models(image: bool) -> tuple[str | None, str | None]:
 def dual_read(*, text: str | None = None, image_png: bytes | None = None, det: dict | None, log) -> dict:
     ma, mb = models(image_png is not None)
     def vote(model, variant, tag):
-        read = lambda extra: llm.read_page(text=text, image_png=image_png, extra=variant + extra, model=model)
-        d, errs, n = guard.ai_extract_with_guard(read, text, lambda m, lvl="info": log(f"[{tag}] {m}", lvl), max_repairs=1, det=det)
-        return {"data": d, "guard_errors": errs, "attempts": n, "model": model or "default"}
+        cands = [model] + [m for m in os.getenv("OPENCODE_FALLBACK_MODELS", "opencode/step-5-preview-free,opencode/big-pickle").split(",")
+                           if m and m != model] if os.getenv("EXTRACTOR", "").lower() == "opencode" and image_png is None else [model]
+        last = None
+        for m in cands:
+            read = lambda extra, m=m: llm.read_page(text=text, image_png=image_png, extra=variant + extra, model=m)
+            try:
+                d, errs, n = guard.ai_extract_with_guard(read, text, lambda msg, lvl="info": log(f"[{tag}:{m}] {msg}", lvl), max_repairs=1, det=det)
+                return {"data": d, "guard_errors": errs, "attempts": n, "model": m or "default"}
+            except RuntimeError as e:   # model unavailable / timed out every attempt -> next free model
+                last = e
+        return {"data": None, "guard_errors": [f"vote {tag} failed on all models: {last}"], "attempts": 0, "model": None}
     par = int(os.getenv("AI_PARALLEL", "2"))
     with ThreadPoolExecutor(max_workers=par) as ex:
         fa = ex.submit(vote, ma, "", "A"); fb = ex.submit(vote, mb, VARIANT_B, "B")
         A, B = fa.result(), fb.result()
-    dis = compare(A["data"], B["data"], det)
+    if A["data"] is None and B["data"] is None:
+        raise RuntimeError("both independent AI reads failed: " + "; ".join(A["guard_errors"] + B["guard_errors"]))
+    if A["data"] is None:   # keep the surviving read but never auto-accept a single vote
+        A, B = B, A
+    dis = compare(A["data"], B["data"], det) if B["data"] is not None else [{"field": "*", "a": "read ok", "b": "read failed", "deterministic": None}]
     arith = guard.arithmetic_errors(A["data"])
     agreed = not dis and not arith and not A["guard_errors"] and not B["guard_errors"]
     log(f"agreement: {'ACCEPTED' if agreed else 'NEEDS_REVIEW'} disagreements={len(dis)} arithmetic={len(arith)}", "info" if agreed else "warn")
