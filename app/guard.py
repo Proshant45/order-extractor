@@ -24,7 +24,9 @@ def arithmetic_errors(d: dict) -> list[str]:
                     e.append(f"PO {p.get('po_number')} {l.get('color')}: rate {l['rate']} x {s} != net_value {l['net_value']}")
                 tv += float(l["net_value"])
         if p.get("stated_total_qty") is not None and int(float(p["stated_total_qty"])) != tq:
-            e.append(f"PO {p.get('po_number')}: lines sum {tq} != stated_total_qty {p['stated_total_qty']}")
+            st = int(float(p["stated_total_qty"]))
+            hint = " (looks like per-pack breakup: multiply each size by the number of packs)" if tq and tq < st and st % tq == 0 or (tq and tq * 10 < st) else ""
+            e.append(f"PO {p.get('po_number')}: lines sum {tq} != stated_total_qty {p['stated_total_qty']}{hint}")
         if p.get("stated_total_value") is not None and tv and abs(tv - float(p["stated_total_value"])) > 0.011:
             e.append(f"PO {p.get('po_number')}: lines value {tv:.2f} != stated_total_value {p['stated_total_value']}")
     return e

@@ -25,7 +25,7 @@ def handle(c, j):
         f = Path(d) / ("page.png" if j.get("image_b64") else "page.txt")
         f.write_bytes(base64.b64decode(j["image_b64"])) if j.get("image_b64") else f.write_text(j.get("text") or "")
         try:
-            out = opencode_provider.run(j["prompt"] + f"\nThe document is in the attached file {f.name}. Output JSON only.", [f],
+            out = opencode_provider.run(j["prompt"] + ("\nThe page image is attached. Output JSON only." if j.get("image_b64") else "\nOutput JSON only."), [f],
                                         j.get("model"), min(int(os.getenv("OPENCODE_TIMEOUT_S", "300")), j.get("lease_s", 360) - 30))
             body = {"id": j["id"], "lease_id": j["lease_id"], "text": out}
         except Exception as e:
@@ -37,6 +37,14 @@ def handle(c, j):
             return
         except Exception as e:
             log("post result failed, retrying", e); time.sleep(5 * (attempt + 1))
+
+def beat():
+    """Heartbeat every 20s while running, so long opencode jobs don't show the worker as offline."""
+    with httpx.Client(timeout=20) as c:
+        while not stop.is_set():
+            try: c.post(URL + "/api/worker/heartbeat", json={"worker": NAME, "info": "busy"}, headers=H)
+            except Exception: pass
+            stop.wait(20)
 
 def loop(i):
     with httpx.Client(timeout=httpx.Timeout(60, connect=20), follow_redirects=False) as c:
@@ -65,9 +73,11 @@ if __name__ == "__main__":
     log(f"worker {NAME} -> {URL} threads={THREADS}")
     ts = [threading.Thread(target=loop, args=(i,), daemon=True) for i in range(THREADS)]
     [t.start() for t in ts]
+    threading.Thread(target=beat, daemon=True).start()
     try:
         while any(t.is_alive() for t in ts):
             time.sleep(1)
     except KeyboardInterrupt:
         stop.set()
+    stop.set()
     log("worker exiting (queue drained)" if DRAIN else "worker exiting")

@@ -13,6 +13,9 @@ RULES = {
     "control_sheet": [r"control\s*sheet", r"standard\s+pack", r"packing\s+list", r"assortment", r"ratio\s+pack"],
     "purchase_order": [r"purchase\s*order", r"\bP\.?\s*O\.?\s*(no|number|#)", r"order\s*sheet", r"order\s+details", r"\bPO\d", r"\bPO\b"],
 }
+NAME_ONLY = {"sales_contract": [r"(^|[\s\-])S\.?C(\s*\d+)?\.(pdf|jpe?g|png|xlsx?|docx?)$", r"\bSC\s*\d"],
+             "purchase_order": [r"(^|[\s\-])P\.?O(\s*\d+)?\.(pdf|jpe?g|png|xlsx?|docx?)$"],
+             "proforma_invoice": [r"(^|[\s\-])P\.?I(\s*\d+)?\.(pdf|jpe?g|png|xlsx?|docx?)$"]}
 W_NAME, W_TEXT = 3, 1
 
 def classify(name: str, text: str | None) -> tuple[str, dict]:
@@ -25,6 +28,7 @@ def classify(name: str, text: str | None) -> tuple[str, dict]:
             if re.search(p, nm, re.I):
                 s += W_NAME
             s += min(len(re.findall(p, head, re.I)), 5) * W_TEXT
+        s += sum(W_NAME for p in NAME_ONLY.get(t, []) if re.search(p, nm, re.I))
         scores[t] = s
     best = max(scores, key=scores.get)
     if scores[best] == 0:

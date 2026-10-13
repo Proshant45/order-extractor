@@ -1,4 +1,4 @@
-"""Vision/text LLM reader. Keys come only from env (GEMINI_API_KEY preferred, OPENAI_API_KEY fallback)."""
+"""AI reader: page text or image -> order JSON. On Render it goes through the job queue to the box worker (opencode)."""
 from __future__ import annotations
 import base64, json, os, re
 import httpx
@@ -12,7 +12,8 @@ Return strict JSON (no prose) with this shape; use null for anything not present
    "sales_contract_number":str|null,"stated_total_qty":number|null,"stated_total_value":number|null,
    "lines":[{"style":str|null,"color":str,"color_code":str|null,"sizes":{"<size label>":int},
              "order_qty":int|null,"rate":number|null,"net_value":number|null}]}]}
-One line per (style,color). "style" is the base style/article code as printed in the style or material column (e.g. "WEC015315"), without appended colour or size codes; put a separate numeric colour code in "color_code". "color" is the colour NAME as printed (e.g. from a material description table), not a code. Dates as printed. Copy every quantity exactly. Sizes keyed by their size code (e.g. "S","M","L","XL","38","15.5","2T"); write words like "small"/"medium"/"large" as S/M/L. Quantities are integers."""
+One line per (style,color). "style" is the base style/article code as printed in the style or material column (e.g. "WEC015315"), without appended colour or size codes; put a separate numeric colour code in "color_code". "color" is the colour NAME as printed (e.g. from a material description table), not a code. Dates as printed. Copy every quantity exactly. Sizes keyed by their size code (e.g. "S","M","L","XL","38","15.5","2T"); write words like "small"/"medium"/"large" as S/M/L. Quantities are integers.
+PACKS: if quantities are given as ratio/assortment/pre-packs (e.g. "Qty of Ratio Packs 130" with a size "Break up Qty" or "Pack Breakup" of 2,2,1...), the size quantity is pieces = number of packs x pieces of that size per pack (130 x 2 = 260). Never report the per-pack breakup as the size quantity. Sizes must add up to the stated total pieces. If several packs share a colour, add their pieces per size."""
 
 def _json(text: str) -> dict:
     m = re.search(r"\{.*\}", text, re.S)
@@ -23,7 +24,7 @@ def _json(text: str) -> dict:
 def read_page(*, image_png: bytes | None = None, text: str | None = None, extra: str = "", model: str | None = None) -> dict:
     prov = config.llm_provider()
     if prov is None:
-        raise RuntimeError("No LLM key configured (set GEMINI_API_KEY or OPENAI_API_KEY)")
+        raise RuntimeError("AI reader not enabled on this server (AI_QUEUE/WORKER_TOKEN not set)")
     if text is not None:
         text = text[:60000]
     if prov == "queue":

@@ -33,17 +33,25 @@ def _rss_mb(pid: int) -> float:
             pass
     return tot / 1048576
 
-NO_TOOLS = ("\n\nIMPORTANT: do not call any tools. The attached file content is already in this message. "
-            "Answer directly with the JSON only.")
+NO_TOOLS = ("\n\nIMPORTANT: you must NOT call any tool (no read, bash, glob, grep, edit, webfetch). Everything you need "
+            "is in this message. Respond immediately with the final JSON object only.")
 
 def run(prompt: str, files: list[Path] = (), model: str | None = None, timeout: int | None = None) -> str:
     """One retry when the model wanders into a tool call and the run ends without an answer."""
+    # Free tier rejects custom agents / disabled tools, so keep the default agent and remove the reason to use
+    # tools: inline text files in the message and only attach images.
+    files = list(files)
+    inline = [f for f in files if Path(f).suffix.lower() in (".txt", ".csv", ".md", ".json") and Path(f).stat().st_size < 120_000]
+    if inline:
+        files = [f for f in files if f not in inline]
+        prompt = prompt + "".join(f"\n\n=== DOCUMENT TEXT ({Path(f).name}) ===\n" + Path(f).read_text(errors="replace") + "\n=== END ===" for f in inline)
+    prompt += NO_TOOLS
     try:
         return _run(prompt, files, model, timeout)
     except RuntimeError as e:
         if "tool_use" not in str(e) and "tool-calls" not in str(e):
             raise
-        return _run(prompt + NO_TOOLS, files, model, timeout)
+        return _run(prompt + "\nThe previous attempt called a tool and was discarded. Do NOT call tools. JSON only.", files, model, timeout)
 
 def _run(prompt: str, files: list[Path] = (), model: str | None = None, timeout: int | None = None) -> str:
     exe = binary()
