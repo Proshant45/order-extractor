@@ -324,6 +324,11 @@ async def worker_result(req: Request):
     st = db.finish_job(b["id"], b["lease_id"], result=b.get("text"), error=b.get("error"))
     return {"ack": st}
 
+@app.post("/api/worker/renew")
+async def worker_renew(req: Request):
+    b = await req.json()
+    return {"ok": db.renew_job(int(b.get("id", 0)), str(b.get("lease_id", "")))}
+
 @app.post("/api/worker/heartbeat")
 async def worker_hb(req: Request):
     b = await req.json(); db.heartbeat(str(b.get("worker", "box"))[:60], str(b.get("info", ""))[:200]); return {"ok": True}

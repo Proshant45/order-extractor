@@ -171,6 +171,13 @@ def claim_job(worker, owner=None):
                   (lease, t + LEASE_S, worker, now(), r["id"]))
         return dict(r, lease_id=lease, lease_s=LEASE_S)
 
+def renew_job(jid, lease_id):
+    """Extend a live lease (worker still running a long read). False if the lease is gone/stale."""
+    with conn() as c:
+        n = c.execute("UPDATE ai_jobs SET lease_until=?, updated_at=? WHERE id=? AND lease_id=? AND status='leased'",
+                      (_time.time() + LEASE_S, now(), jid, lease_id)).rowcount
+    return n == 1
+
 def finish_job(jid, lease_id, result=None, error=None):
     """Idempotent: a result for an already-finished job or a stale lease is acknowledged and ignored."""
     with conn() as c:

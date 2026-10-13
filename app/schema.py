@@ -87,11 +87,20 @@ class PO(BaseModel):
     stated_total_qty: Optional[int] = None
     stated_total_value: Optional[float] = None
     currency: Optional[str] = None
+    date_raw: dict[str, str] = Field(default_factory=dict)   # dates as printed that could not be parsed (e.g. '13/09', no year)
 
-    @field_validator("po_date", "ship_date", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def _d(cls, v):
-        return parse_date(v)
+    def _dates(cls, d):
+        if isinstance(d, dict):
+            d = dict(d); raw = dict(d.get("date_raw") or {})
+            for k in ("po_date", "ship_date"):
+                try:
+                    d[k] = parse_date(d.get(k))
+                except ValueError:
+                    raw[k] = str(d.get(k)); d[k] = None
+            d["date_raw"] = raw
+        return d
 
     @field_validator("stated_total_qty", mode="before")
     @classmethod
@@ -157,6 +166,8 @@ def warnings_for(order: Order) -> list[str]:
     if not order.pos:
         w.append("No PO found")
     for p in order.pos:
+        for k, v in p.date_raw.items():
+            w.append(f"PO {p.po_number}: {k} '{v}' could not be read as a full date (kept as printed; fill manually)")
         for l in p.lines:
             if not l.color:
                 w.append(f"PO {p.po_number}: line {l.style or ''} {l.color_code or ''} has no colour name")

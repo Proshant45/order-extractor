@@ -20,7 +20,20 @@ busy = [0]; busy_lock = threading.Lock()   # drain mode: idle threads stay while
 def log(*a):
     print(time.strftime("%H:%M:%S"), *a, flush=True)
 
+def _renewer(j, done):
+    with httpx.Client(timeout=20) as c:
+        while not done.wait(int(os.getenv("RENEW_EVERY_S", "120"))):
+            try: c.post(URL + "/api/worker/renew", json={"id": j["id"], "lease_id": j["lease_id"]}, headers=H)
+            except Exception: pass
+
 def handle(c, j):
+    done = threading.Event(); threading.Thread(target=_renewer, args=(j, done), daemon=True).start()
+    try:
+        _handle(c, j)
+    finally:
+        done.set()
+
+def _handle(c, j):
     t = time.time()
     with tempfile.TemporaryDirectory(prefix="oew_") as d:
         f = Path(d) / ("page.png" if j.get("image_b64") else "page.txt")

@@ -49,3 +49,16 @@ def test_disagreement_flags_review(monkeypatch):
         return d
     _, c = _run(monkeypatch, reader)
     assert c["status"] == "needs_review" and c["disagreements"]
+
+def test_yearless_date_kept_and_flagged():
+    from app.schema import Order, warnings_for
+    o = Order(pos=[{"po_number": "1", "ship_date": "13/09", "lines": []}])
+    assert o.pos[0].ship_date is None and o.pos[0].date_raw == {"ship_date": "13/09"}
+    assert any("13/09" in w for w in warnings_for(o))
+
+def test_lease_renew(tmp_path, monkeypatch):
+    from app import db
+    db.init()
+    jid = db.enqueue_job("p", "m", "t", None, owner="u")
+    j = db.claim_job("w", "u")
+    assert db.renew_job(j["id"], j["lease_id"]) and not db.renew_job(j["id"], "stale")
