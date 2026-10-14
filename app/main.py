@@ -485,4 +485,6 @@ def _highlights(o):
 def order_page(request: Request, oid: int):
     o = db.get_order(oid)
     if not o: raise HTTPException(404)
-    return tpl.TemplateResponse(request, "order.html", {"o": o, "hl": _highlights(o), "active": "book"})
+    hl = _highlights(o)
+    o = {k: v for k, v in o.items() if k not in ("review", "review_status")}   # page only needs the form data + highlights
+    return tpl.TemplateResponse(request, "order.html", {"o": o, "hl": hl, "active": "book"})
