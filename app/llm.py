@@ -13,7 +13,9 @@ Return strict JSON (no prose) with this shape; use null for anything not present
    "lines":[{"style":str|null,"color":str,"color_code":str|null,"sizes":{"<size label>":int},
              "order_qty":int|null,"rate":number|null,"net_value":number|null}]}]}
 One line per (style,color). "style" is the base style/article code as printed in the style or material column (e.g. "WEC015315"), without appended colour or size codes; put a separate numeric colour code in "color_code". "color" is the colour NAME as printed (e.g. from a material description table), not a code. Dates as printed. Copy every quantity exactly. Sizes keyed by their size code (e.g. "S","M","L","XL","38","15.5","2T"); write words like "small"/"medium"/"large" as S/M/L. Quantities are integers.
-PACKS: if quantities are given as ratio/assortment/pre-packs (e.g. "Qty of Ratio Packs 130" with a size "Break up Qty" or "Pack Breakup" of 2,2,1...), the size quantity is pieces = number of packs x pieces of that size per pack (130 x 2 = 260). Never report the per-pack breakup as the size quantity. Sizes must add up to the stated total pieces. If several packs share a colour, add their pieces per size."""
+PACKS: if quantities are given as ratio/assortment/pre-packs (e.g. "Qty of Ratio Packs 130" with a size "Break up Qty" or "Pack Breakup" of 2,2,1...), the size quantity is pieces = number of packs x pieces of that size per pack (130 x 2 = 260). Never report the per-pack breakup as the size quantity. Sizes must add up to the stated total pieces. If several packs share a colour, add their pieces per size.
+ITEMISED LINES WIN: if the document lists one row per SKU (part number / item with its colour, size and quantity) AND also a colour x size summary grid, take the quantities from the itemised rows. Summary grids lose column alignment in extracted text and shift values into the wrong size. Use the grid only to check the totals.
+SHIP DATE: if no separate ship/handover date is printed, use the line "Due Date" / delivery date as ship_date."""
 
 def _json(text: str) -> dict:
     m = re.search(r"\{.*\}", text, re.S)
