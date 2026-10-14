@@ -86,10 +86,14 @@ DOC_TYPES = {"purchase_order":"Purchase order", "sales_contract":"Sales contract
 
 def describe_file(file):
     status=file["status"]; supporting=file.get("doc_type") in ("tech_pack","bom","other")
+    meta=json.loads(file.get('meta') or '{}');has_data=bool(meta.get('document'))
     labels={"done":"Order ready", "cached":"Already extracted" if file.get("order_id") else "Supporting document", "classified":"Supporting document", "pending":"Not extracted", "processing":"Processing", "queued_ai":"Waiting for retry" if file.get('reason') else "Waiting for worker", "failed":"Extraction failed", "skipped":"Not processed", "cancelled":"Cancelled", "retried":"Retried", "edited":"Order edited"}
     label=labels.get(status,status.replace("_"," ").title())
+    if has_data:label='Edited data saved' if meta.get('document_review')=='edited' else 'Document data ready'
     if status=="skipped" and "processing limit" in (file.get("reason") or "").lower():label="Limit reached"
-    if status in ("classified","cached") and not file.get("order_id"):
+    if has_data:
+        explanation=meta['document'].get('summary') or 'Document fields and tables are stored and editable below.'
+    elif status in ("classified","cached") and not file.get("order_id"):
         explanation="Identified as " + DOC_TYPES.get(file.get("doc_type"),"a supporting document") + ". It is available to inspect; no order was created."
     elif status=="cached" and file.get("order_id"):
         explanation="An identical copy was extracted earlier. Open the existing order or inspect the source document."

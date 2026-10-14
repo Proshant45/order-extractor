@@ -24,7 +24,8 @@ def _json(text: str) -> dict:
         raise ValueError("LLM returned no JSON")
     return json.loads(m.group(0))
 
-def read_page(*, image_png: bytes | None = None, text: str | None = None, extra: str = "", model: str | None = None) -> dict:
+def read_page(*, image_png: bytes | None = None, text: str | None = None, extra: str = "", model: str | None = None, prompt: str | None = None) -> dict:
+    instructions=(prompt if prompt is not None else PROMPT)+extra
     prov = config.llm_provider()
     if prov is None:
         raise RuntimeError("AI reader not enabled on this server (AI_QUEUE/WORKER_TOKEN not set)")
@@ -32,7 +33,7 @@ def read_page(*, image_png: bytes | None = None, text: str | None = None, extra:
         if len(text) > 60000:
             raise ValueError(f"document text too large for one read ({len(text)} chars); split required, no text discarded")
     if prov == "queue":
-        return _json(queue_read(PROMPT + extra, text=text, image_png=image_png,
+        return _json(queue_read(instructions, text=text, image_png=image_png,
                                  model=model or (os.getenv("OPENCODE_VISION_MODEL", "opencode/mimo-v2.6-flash-free") if image_png
                                                  else os.getenv("OPENCODE_MODEL", "opencode/big-pickle"))))
     if prov == "opencode":
@@ -43,11 +44,11 @@ def read_page(*, image_png: bytes | None = None, text: str | None = None, extra:
             f = Path(d) / ("page.png" if image_png else "page.txt")
             f.write_bytes(image_png) if image_png else f.write_text(text)
             model = model or (os.getenv("OPENCODE_VISION_MODEL", "opencode/mimo-v2.6-flash-free") if image_png else os.getenv("OPENCODE_MODEL", "opencode/big-pickle"))
-            return _json(opencode_provider.run(PROMPT + extra + f"\nThe document is in the attached file {f.name}. Output JSON only.", [f], model=model))
+            return _json(opencode_provider.run(instructions + f"\nThe document is in the attached file {f.name}. Output JSON only.", [f], model=model))
     with httpx.Client(timeout=config.LLM_TIMEOUT_S) as c:
         if prov == "gemini":
             model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")  # dual read uses prompt variants
-            parts = [{"text": PROMPT + extra}]
+            parts = [{"text": instructions}]
             if image_png:
                 parts.append({"inline_data": {"mime_type": "image/png", "data": base64.b64encode(image_png).decode()}})
             if text:
@@ -59,7 +60,7 @@ def read_page(*, image_png: bytes | None = None, text: str | None = None, extra:
             r.raise_for_status()
             return _json(r.json()["candidates"][0]["content"]["parts"][0]["text"])
         model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-        content = [{"type": "text", "text": PROMPT + extra}]
+        content = [{"type": "text", "text": instructions}]
         if image_png:
             content.append({"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(image_png).decode()}})
         if text:

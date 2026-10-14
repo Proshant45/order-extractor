@@ -115,6 +115,8 @@ def process_one(path: Path, name: str, parent_id=None, size=None, sha=None, forc
     """Extract + validate + store one file. Never raises: failures become 'skipped'/'failed' records."""
     sha = sha or _sha256(path)
     hit = None if force_ai or os.getenv("DISABLE_CACHE") == "1" else db.cached_result(sha)
+    if hit and hit['method']=='classify' and config.llm_provider() is not None:
+        hit=None
     if hit:   # identical bytes already extracted: serve stored result, no AI job
         fid = db.add_file(name, kind=hit["kind"], size=size or path.stat().st_size, sha=sha, parent_id=parent_id, status="cached",
                           reason=f"identical to file {hit['file_id']}")
@@ -167,9 +169,12 @@ def process_one(path: Path, name: str, parent_id=None, size=None, sha=None, forc
                 "review_status": cons["status"], "doc_type": ctx.get("doc_type")}
     except extract.NotOrder as e:
         meta = {"doc_type": str(e), "buyer_hint": ctx.get("buyer_hint"), **(ctx.get("refs") or {})}
-        db.update_file(fid, status="classified", method="classify", doc_type=str(e), meta=json.dumps(meta))
-        lg(f"classified as {e}; not an order document, refs={meta}")
-        return {"file_id": fid, "name": name, "status": "classified", "doc_type": str(e), "category": ctx["category"], "meta": meta}
+        if ctx.get('document'):
+            meta.update(document=ctx['document'],original_document=ctx['document'],document_review='needs_review')
+        method=f'{kind}_document_ai' if ctx.get('document') else 'classify'
+        db.update_file(fid, status="classified", method=method, doc_type=str(e), meta=json.dumps(meta))
+        lg(f"stored {e} document data" if ctx.get('document') else f"identified {e}; structured data unavailable")
+        return {"file_id": fid, "name": name, "status": "classified", "doc_type": str(e), "category": ctx["category"], "meta": meta,"method":method}
     except llm.AIUnavailable as e:
         qdir = config.DATA_DIR / "queue"; qdir.mkdir(exist_ok=True)
         shutil.copyfile(path, qdir / f"{fid}{Path(name).suffix[:10]}")
@@ -655,6 +660,23 @@ def file_data(fid:int):
     return documents.stored_data(file)
 
 
+@app.put('/api/files/{fid}/data')
+async def save_file_data(fid:int,req:Request):
+    from .document_data import DocumentData
+    file=db.get_file(fid)
+    if not file:raise HTTPException(404,'File not found')
+    if file.get('order_id'):raise HTTPException(409,'Edit the linked order using its order form')
+    if file['status'] in ('processing','queued_ai'):raise HTTPException(409,'Wait for extraction to finish before editing')
+    try:document=DocumentData.model_validate(await req.json()).model_dump(mode='json')
+    except (ValidationError,ValueError) as e:raise HTTPException(422,str(e))
+    meta=json.loads(file.get('meta') or '{}')
+    if meta.get('document') and 'original_document' not in meta:meta['original_document']=meta['document']
+    meta.update(document=document,document_review='edited')
+    db.update_file(fid,meta=json.dumps(meta),doc_type=document['document_type'],status='edited',method='document_edited',reason=None)
+    db.log(fid,'Document data edited and saved; AI verification cleared')
+    return {'ok':True,'file_id':fid}
+
+
 @app.get("/api/files/{fid}/source")
 def file_source(fid:int,download:int=0):
     file=db.get_file(fid)
@@ -680,7 +702,7 @@ def file_page(request:Request,fid:int):
     if order:
         for po in order['pos']:
             po['display_sizes']=list(dict.fromkeys(size for line in po['lines'] for size in line['sizes']))
-    return tpl.TemplateResponse(request,"file.html",{"file":info,"preview":preview,"order":order,"data":data,"logs":db.file_logs(fid),"active":"book"})
+    return tpl.TemplateResponse(request,"file.html",{"file":info,"preview":preview,"order":order,"data":data,"document":data['metadata'].get('document'),"logs":db.file_logs(fid),"active":"book"})
 
 @app.get("/api/files/{fid}/logs")
 def api_logs(fid: int):

@@ -348,6 +348,12 @@ def extract_file(path: Path, kind: str, log, ctx=None) -> tuple[dict, str]:
     ctx["doc_type"] = dt; ctx["refs"] = classify.refs(pv)
     log(f"doc type: {dt} {dict((k, v) for k, v in scores.items() if v)}")
     if dt not in classify.ORDER_TYPES and not ctx.get("force_order") and kind != "image" and (pv or "").strip():
+        if config.llm_provider() is not None:
+            from .document_data import extract_document
+            ctx['document']=extract_document(path,kind,dt,log)
+            dt=ctx['document']['document_type'];ctx['doc_type']=dt
+            if dt in classify.ORDER_TYPES:
+                return extract_ai_primary(path,kind,log,ctx)
         raise NotOrder(dt)
     if ai_primary(ctx):
         return extract_ai_primary(path, kind, log, ctx)

@@ -82,3 +82,40 @@ def test_retained_zip_registers_every_file_even_without_extraction(documents_cli
     assert all(row['status']=='pending' and row['order_id'] is None for row in entries)
     documents.restore_retained_batch_sources()
     assert len(documents_client.get('/api/files').json())==59
+
+
+def test_supporting_data_is_extracted_editable_and_saved(documents_client,monkeypatch):
+    from app import llm
+    monkeypatch.setattr(config,'llm_provider',lambda:'queue')
+    calls=[]
+    def read(**kwargs):
+        calls.append(kwargs)
+        return {'document_type':'tech_pack','summary':'Jacket specifications','fields':[{'name':'Style','value':'JACKET-1'}],
+                'tables':[{'name':'Measurements','columns':['Size','Chest'], 'rows':[['S',92],['M',96]]}], 'warnings':[]}
+    monkeypatch.setattr(llm,'read_page',read)
+    c=documents_client
+    item=c.post('/api/upload',files={'file':('tech-pack.txt',b'Tech Pack\nStyle JACKET-1\nChest S 92 M 96')} ).json()['items'][0]
+    fid=item['file_id'];data=c.get(f'/api/files/{fid}/data').json()
+    assert calls and data['metadata']['document']['tables'][0]['rows'][0]==['S',92]
+    document=data['metadata']['document'];document['fields'][0]['value']='JACKET-EDITED';document['tables'][0]['rows'][0][1]=94
+    response=c.put(f'/api/files/{fid}/data',json=document)
+    assert response.status_code==200 and response.json()['ok'] is True
+    saved=c.get(f'/api/files/{fid}/data').json()['metadata']
+    assert saved['document']['fields'][0]['value']=='JACKET-EDITED'
+    assert saved['document']['tables'][0]['rows'][0][1]==94
+    assert saved['original_document']['tables'][0]['rows'][0][1]==92
+    page=c.get(f'/files/{fid}').text
+    assert 'Measurements' in page and 'Save document data' in page and 'JACKET-EDITED' in page
+    assert db.processing_budget_status()['used']==1
+    cached=c.post('/api/upload',files={'file':('duplicate-tech-pack.txt',b'Tech Pack\nStyle JACKET-1\nChest S 92 M 96')}).json()['items'][0]
+    assert cached.get('cached') is not True
+
+
+def test_invalid_document_edit_cannot_overwrite_saved_data(documents_client):
+    fid=db.add_file('bom.txt',kind='text',status='classified')
+    c=documents_client
+    valid={'document_type':'bom','summary':'Materials','fields':[], 'tables':[{'name':'Materials','columns':['Fabric','Usage'],'rows':[['Cotton',1.5]]}],'warnings':[]}
+    assert c.put(f'/api/files/{fid}/data',json=valid).status_code==200
+    bad={**valid,'tables':[{'name':'Materials','columns':['Fabric'],'rows':[['Cotton',1.5]]}]}
+    assert c.put(f'/api/files/{fid}/data',json=bad).status_code==422
+    assert c.get(f'/api/files/{fid}/data').json()['metadata']['document']==valid

@@ -203,7 +203,7 @@ def cached_result(sha):
     """Most recent successful extraction of identical bytes."""
     with conn() as c:
         r = c.execute("SELECT f.id file_id, f.method, f.doc_type, f.meta, f.kind, f.status, o.id order_id, o.review_status FROM files f "
-                      "LEFT JOIN orders o ON o.file_id=f.id WHERE f.sha256=? AND f.status IN ('done','classified') AND (o.id IS NOT NULL OR f.status='classified') ORDER BY f.id DESC LIMIT 1", (sha,)).fetchone()
+                      "LEFT JOIN orders o ON o.file_id=f.id WHERE f.sha256=? AND f.status IN ('done','classified') AND (o.id IS NOT NULL OR f.status='classified') AND NOT EXISTS(SELECT 1 FROM files edited WHERE edited.sha256=f.sha256 AND edited.method='document_edited' AND edited.id>=f.id) ORDER BY f.id DESC LIMIT 1", (sha,)).fetchone()
         return dict(r) if r else None
 
 def get_job(jid):

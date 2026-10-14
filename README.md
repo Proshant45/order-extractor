@@ -72,3 +72,7 @@ ZIP entries are registered and originals retained before AI processing, within t
 ## One-time queue cleanup
 
 On the first startup with this update, `app.maintenance.clear_existing_queue_once()` cancels existing queued/leased AI jobs, unfinished file extractions and processing batches, preserves saved orders and available original documents, and starts a fresh 20-file allowance. A marker in the same persistent database prevents this cleanup/reset from running again on later deployments. Run `python scripts/clear_existing_queue_once.py` manually against the app's environment to invoke the same guarded operation. Completed batch results waiting for AI are reconciled to cancelled; future uploads are unaffected by repeat invocations.
+
+## Editable supporting document data
+
+Supporting files also use OpenCode to extract structured fields and tables when AI is configured. Tech-pack measurements/construction and BOM materials/consumption remain document data rather than purchase orders. The document page provides editable values, add/remove table rows and a Save document data button. Saves are schema-validated and read back before success is displayed. The original extraction stays preserved separately; manual edits clear AI verification and invalidate older cached data. These reads share the persistent 20-file budget. Classification-only files are freshly extracted on re-upload with AI enabled. Supporting-file AI output is marked as needing source review. `PUT /api/files/{id}/data` saves these values; order documents use the existing order form.
