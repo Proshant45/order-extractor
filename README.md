@@ -1,82 +1,66 @@
 # Order Extractor
 
-Upload buyer documents (POs, sales contracts, order sheets, PIs, control sheets, tech packs, BOMs) one at a time or as a ZIP.
-Order documents are extracted into a structured order (header + POs + colour x size quantities), validated, stored in SQLite and shown
-in a Texora360-style New Order page you can review, edit and save. Login required (single account).
+Upload purchase orders, sales contracts, order sheets, invoices, control sheets, tech packs and BOMs individually or as a ZIP. Order documents become stored, editable drafts with headers, POs, colour/size quantities, dates, rates and values. Supporting documents have editable fields and tables. Login is required.
 
-## How extraction works
-1. **Upload**: streamed to disk in 1 MB chunks. Single files up to `MAX_UPLOAD_MB` (25), ZIPs up to `MAX_ZIP_MB` (100).
-   ZIP entries are processed one at a time (each streamed to a temp file): entry count, total and per-entry size (checked on real bytes),
-   compression-ratio (zip bomb), path traversal, encrypted entries, nesting depth 1. Junk (`__MACOSX`, `.DS_Store`, `Thumbs.db`, hidden) and
-   corrupt files are skipped with a reason; one bad file never fails the batch.
-2. **Cache**: every file / ZIP entry is hashed (SHA-256). Identical bytes already extracted are served from the stored result (`cached`).
-3. **Classify**: purchase_order, sales_contract, proforma_invoice, control_sheet, tech_pack, bom, other. Order-type documents are extracted;
-   tech packs / BOMs / other are stored with their type and style/PO references and linked per buyer (`GET /api/links`).
-4. **AI read**: OpenCode workers use one fast free read per chunk by default. PDFs use up to 4 pages, split at new PO boundaries when printed headers can be read, with a 30,000-character input cap. Scanned chunks attach all page images in order. A chunk with invalid output or failed checks gets one repair read. Completed queue reads are reused during file retries. Size sums, quantity × rate, printed totals, PO coverage and supported deterministic layouts are checked; full-PO totals are checked again after chunks merge. Unresolved errors stay visible as warnings. `checked` means single-model validation passed; it does not mean two readers agreed. Explicit `AI_READ_MODE=dual` retains independent reads and highlighted differences.
-5. **Store**: SQLite tables `files`, `orders`, `pos`, `po_lines`, `extraction_logs`, `ai_jobs`, `batches`, `kv`.
+## OpenRouter setup
 
-## AI worker (pull model)
-The web app never runs a model. AI reads are queued as jobs (`ai_jobs`) tagged with the uploading account.
-A worker on a separate machine with enough RAM polls the app over HTTPS with a bearer `WORKER_TOKEN`:
-- `GET /api/worker/pending?owner=<account>` - cheap count, used by the tick
-- `GET /api/worker/next?owner=<account>` - claims one job with a lease (expired leases are re-queued, max 3 attempts)
-- `POST /api/worker/result` - `{id, lease_id, text|error}`; idempotent, stale leases ignored
+Set `OPENROUTER_API_KEY` in Render Environment and deploy the latest commit. The key takes priority over old `AI_QUEUE` and `EXTRACTOR` settings. Render calls the API directly; no separate worker machine is needed. Keep the key in the environment, never in Git.
 
-Box setup (`worker/`):
-- `worker/.env` (chmod 600): `APP_URL`, `WORKER_TOKEN`, `APP_ACCOUNT`, `OPENCODE_API_KEY`, `WORKER_THREADS`
-- `worker/tick.py`: AI-less check, failure/work log lines (`worker/tick.log`, rotated); idle successful checks stay quiet. 0 pending -> exits; otherwise runs
-  `worker/box_worker.py --drain`, which runs `opencode run` locally per job and exits when the queue is empty. The loop checks every15seconds while idle.
-- Schedule: `nohup worker/tick_loop.sh >/dev/null 2>&1 &` for15-second checks. A standard once-per-minute crontab checks only every60seconds.
+The default text and image model is `dots-studio/dots-3-note-preview:free`. Override with `OPENROUTER_MODEL` or `OPENROUTER_VISION_MODEL`. Every requested model must have an explicit `:free` ID, zero pricing for every listed catalog component, and the required input capabilities. Requests also cap prompt/completion prices at zero. Paid models are rejected before inference. Provider outages can fall back to `google/gemma-4-31b-it:free`, subject to the same checks; `OPENROUTER_FALLBACK_MODEL` overrides it.
 
-If the worker is offline, files are marked `queued_ai` and re-processed automatically once it is back. The UI shows worker online/offline,
-last heartbeat, queued jobs and cached results.
+The supplied account reported a **50-request daily free quota** during verification. Each chunk, repair or fallback uses an API request; the separate 20-file budget counts documents. Free models can be busy or rate-limited. Files remain visible as waiting for AI and are retained for automatic retry after a persisted cooldown. Truncated output is rejected.
 
-## API
-- Orders CRUD: `GET /api/orders?q=`, `POST /api/orders`, `GET/PUT/DELETE /api/orders/{id}`. UI: `/` (list + search + upload), `/orders/new`, `/orders/{id}` (edit/save/delete)
-- `POST /api/extract?wait=0` -> `{batch_id}`; `GET /api/batches/{id}?view=api` -> `{summary, results:[{status, file, format, doc_type, cached,
-  order, pos, lines, totals, validation, agreement:{status, models, disagreements}, versions}]}`
-- `POST /api/upload`, `GET /api/orders`, `GET/PUT /api/orders/{id}`, `GET /api/files`, `GET /api/links`, `GET /api/ai-status`, `GET /healthz` (public)
+See [OpenRouter verification](docs/openrouter-verification.md) for measured results and limitations.
 
-## Run / test
-    pip install -r requirements-dev.txt
-    uvicorn app.main:app --reload
-    pytest -q            # sample PO at tests/fixtures/sample_po.pdf (gitignored) or SAMPLE_PDF
+## Extraction and progress
 
-## Render
-`render.yaml`: web service, `/healthz` health check. Env: `APP_USERNAME`, `APP_PASSWORD_HASH` (bcrypt), `SECRET_KEY`, `AI_QUEUE=1`,
-`WORKER_TOKEN`, `DATA_DIR`. On the free plan there is no disk: SQLite lives in `/tmp` and resets on redeploy/restart/spin-down;
-the worker's polling keeps the instance awake while it runs.
+PDFs use up to four pages per chunk, split where a new PO starts when text headers are readable. Dense pages use smaller groups to respect the 30,000-character text cap. Scanned chunks include every page image in order. Long spreadsheet/text inputs are split with rows retained. Configure `AI_CHUNK_PAGES` to 3 or 4 and `AI_CHUNK_MAX_CHARS` as needed. The default prepares and processes one chunk at a time.
 
-## Local verification and live progress
+Normal chunks use one read. Invalid output or failed checks triggers one repair read. Checks include size sums, quantity × rate, printed totals, PO coverage and recognised deterministic layouts. Whole-PO totals are checked again after merging. Completed reads are reused during file retries. `checked` means the available checks passed; it does not guarantee every source field is correct. Unresolved mismatches remain visible for review.
 
-Run `.venv/bin/python scripts/local_stack.py` after installing the development dependencies and configuring ignored `.env` and `worker/.env`. The local app runs at `http://127.0.0.1:8765`; the worker loop polls every15seconds while idle and drains queued jobs when active. `APP_ACCOUNT` must match `APP_USERNAME`. The loop holds one repository-specific flock for its lifetime.
-
-The upload screen streams progress with SSE from `/api/batches/{id}/events` and reconciles through `/api/progress?bid={id}` after reconnects. It shows worker receipt, AI start/output/return, saved order, actual read/page attempts and files finished. Repairs can add reads; these counters measure completed requests, not model tokens or a guessed percentage.
-
-Both synchronous and background uploads retain their input and batch metadata under persistent `DATA_DIR`. Interrupted batches replay after server restart; identical completed entries use cache. Worker results remain in an ignored local outbox until the server returns a recognised acknowledgement. Edited/deleted orders invalidate their source cache. Manual changes clear the original AI agreement badge.
-
-Use `.venv/bin/python scripts/check_local_extraction.py /path/to/document` for real HTTP/worker extraction with retained reports. The checked PO fixture is restored from the supplied ZIP and remains ignored. See [assignment verification](docs/assignment-verification.md) for measured results and limits. No universal accuracy or production crash guarantee is implied by a passing local sample.
+The upload page streams actual progress through SSE, with polling after reconnects. It shows requested pages, model, start/return times, failed reads, repairs and stored results. Counters track requests and files, not guessed model progress.
 
 ## System processing budget
 
-The entire app has a hard budget of 20 files sent to AI, shared by single-file and ZIP uploads. Each document entering AI consumes one persistent slot; independent reads, repairs and crash retries share that slot. Cached results and documents classified without AI consume no new slot. Once 20 slots are used, further files are reported as skipped with the processing-limit reason and no AI job is sent. Finished or deleted orders do not replenish the budget. Existing AI-processed files count when the limit is introduced. The upload page shows used/remaining counts; `GET /api/processing-limit` reports the persisted budget.
+The app has a persistent budget of **20 files sent to AI**, shared by all single-file and ZIP uploads. A document consumes one slot; chunks, repairs, provider changes and crash retries share that slot. Cached results and classification without AI consume no new slot. Once 20 are used, further documents are skipped with the limit reason. Finishing or deleting an order does not replenish the budget. The upload page and `GET /api/processing-limit` show used/remaining counts.
 
-## Documents and stored data
+## Documents and CRUD
 
-The document list shows every distinct uploaded file, including ZIP entries that have not been extracted. Repeated identical uploads with the same filename share a list entry; their individual records remain accessible by file ID. Open a document to see its current saved order header, POs, colour/size quantities, dates, rates, values and warnings, then use the existing order form to edit/save. Supporting documents show their stored references and original contents. Unfinished and failed files explicitly show that no extracted order is stored. Originals can be viewed/downloaded; cached duplicates link to the existing order. `GET /api/files/{id}/data` returns current saved data and original extraction separately.
+The Documents list links every distinct uploaded file, including ZIP entries awaiting extraction. Repeated identical uploads with the same filename are grouped; records remain accessible by ID. Order documents show their stored header, POs, quantities, values and warnings, with a link to the order editor. Supporting documents show structured fields and tables that can be edited, added, removed and saved. Original contents are available to view/download.
 
-ZIP entries are registered and originals retained before AI processing, within the existing ZIP size/security guards. Spreadsheet previews show up to 100 rows and 40 columns per sheet; download the original for the complete sheet. Original documents stored before this change are restored from retained batch inputs when available; missing originals are reported explicitly. Progress separates actual queued AI reads, unprepared files, retries and failed/cancelled reads.
+Saves are schema-validated and read back before the UI displays success. Manual edits clear AI verification and invalidate the old source cache. Original extraction is preserved separately. Failed and unfinished files explicitly show that no final extracted data is available. Spreadsheet previews show up to 100 rows and 40 columns per sheet; download the original for the complete sheet.
+
+Uploads are streamed to disk. Defaults allow 25 MB per single file and 100 MB per ZIP. ZIP guards cover entry/total sizes, compression ratios, traversal, encryption and nesting. Corrupt or unsupported entries receive an explicit reason. Entries are indexed and originals retained before processing. Interrupted batches replay after restart when their input and database remain on persistent storage.
+
+## Deploy on Render
+
+The blueprint uses a persistent disk, `/healthz` health check and a single web process. Configure `APP_USERNAME`, `APP_PASSWORD_HASH` (bcrypt), `SECRET_KEY`, `OPENROUTER_API_KEY` and `DATA_DIR`. Defaults are `EXTRACTOR=openrouter` and `AI_QUEUE=0`. OpenCode is not installed by the default build.
+
+On a Render plan without persistent storage, SQLite and retained inputs are lost on restart/redeploy; retry cannot recover lost storage. The API key must be added through Render Environment, not committed to the repository.
+
+## API
+
+- Orders: `GET /api/orders?q=`, `POST /api/orders`, `GET/PUT/DELETE /api/orders/{id}`.
+- Upload: `POST /api/upload?wait=0` returns a tracked batch; `GET /api/batches/{id}` returns its outcome.
+- Structured extraction: `POST /api/extract?wait=0`, then `GET /api/batches/{id}?view=api`.
+- Stored document data: `GET /api/files`, `GET /api/files/{id}/data`, `PUT /api/files/{id}/data` for supporting documents.
+- Source: `GET /api/files/{id}/source` (append `?download=1`).
+- Progress/status: `GET /api/progress?bid={id}`, `/api/batches/{id}/events`, `/api/ai-status`, `/api/processing-limit`.
 
 ## One-time queue cleanup
 
-On the first startup with this update, `app.maintenance.clear_existing_queue_once()` cancels existing queued/leased AI jobs, unfinished file extractions and processing batches, preserves saved orders and available original documents, and starts a fresh 20-file allowance. A marker in the same persistent database prevents this cleanup/reset from running again on later deployments. Run `python scripts/clear_existing_queue_once.py` manually against the app's environment to invoke the same guarded operation. Completed batch results waiting for AI are reconciled to cancelled; future uploads are unaffected by repeat invocations.
+`app.maintenance.clear_existing_queue_once()` cancels existing queued/leased reads, unfinished files and processing batches on its first invocation. It preserves saved orders and available originals and resets the 20-file allowance. A persistent marker prevents repeated cleanup on later deployments. `python scripts/clear_existing_queue_once.py` invokes the same guarded operation manually. The OpenRouter migration does not request another database wipe.
 
-## Editable supporting document data
+## Run and test
 
-Supporting files also use OpenCode to extract structured fields and tables when AI is configured. Tech-pack measurements/construction and BOM materials/consumption remain document data rather than purchase orders. The document page provides editable values, add/remove table rows and a Save document data button. Saves are schema-validated and read back before success is displayed. The original extraction stays preserved separately; manual edits clear AI verification and invalidate older cached data. These reads share the persistent 20-file budget. Classification-only files are freshly extracted on re-upload with AI enabled. Supporting-file AI output is marked as needing source review. `PUT /api/files/{id}/data` saves these values; order documents use the existing order form.
+```bash
+pip install -r requirements-dev.txt
+uvicorn app.main:app --reload
+pytest -q
+```
 
-## Free-model chunk settings
+Tests use temporary databases and disable real API keys by default. The sample PO fixture is gitignored; use `SAMPLE_PDF` when needed.
 
-`OPENCODE_FAST_MODEL` defaults to `opencode/mimo-v2.6-flash-free`. `AI_CHUNK_PAGES` can be 3 or 4 (default 4); dense pages may require smaller groups to respect `AI_CHUNK_MAX_CHARS` (default 30000). Long spreadsheet/text inputs are split with every row retained. Keep the server text cap at or below the box's `WORKER_MAX_TEXT`. The default checked path prepares one chunk at a time; `AI_PAGE_PARALLEL` can override this. Existing `OPENCODE_MODEL`/`OPENCODE_MODEL_B` settings apply to explicit dual mode rather than overriding the fast checked reader.
+## Optional legacy OpenCode worker
 
-Deploy the web app **and update/restart `worker/box_worker.py` on the box**. Updated workers advertise `image_batches=1` and forward every page image to OpenCode; older workers cannot claim multi-page image jobs, so they cannot silently read only the first page. Text and single-image jobs remain compatible. The system-wide 20-file allowance still counts documents, not their chunks, page images or retries. A chunk can pass arithmetic checks while containing a source-reading error; source review remains necessary.
+Explicitly set `EXTRACTOR=queue`, `AI_QUEUE=1`, `WORKER_TOKEN` and remove `OPENROUTER_API_KEY` to use an existing box setup. `worker/.env` requires `APP_URL`, `WORKER_TOKEN`, `APP_ACCOUNT` and legacy model settings. `worker/tick_loop.sh` checks every 15 seconds and drains jobs with `worker/box_worker.py`. `AI_READ_MODE=dual` enables legacy independent reads. This mode is optional; OpenRouter does not call OpenCode. Legacy local verification scripts remain in `scripts/`.

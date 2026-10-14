@@ -23,6 +23,8 @@ ZIP_MAX_RATIO = float(os.getenv("ZIP_MAX_RATIO", "100"))
 ZIP_MAX_DEPTH = 1
 
 def llm_provider():
+    if os.getenv('OPENROUTER_API_KEY') or os.getenv('EXTRACTOR','openrouter').lower()=='openrouter':
+        return 'openrouter' if os.getenv('OPENROUTER_API_KEY') else None
     if os.getenv("AI_QUEUE") == "1" and os.getenv("WORKER_TOKEN"):
         return "queue"
     if os.getenv("EXTRACTOR", "").lower() == "opencode":

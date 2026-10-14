@@ -5,7 +5,7 @@ The deterministic parser, when it recognises a layout, is a third vote used only
 from __future__ import annotations
 import os, re
 from concurrent.futures import ThreadPoolExecutor
-from . import guard, llm
+from . import guard, llm, config
 
 VARIANT_B = ("\nSECOND INDEPENDENT READ: work bottom-up. First locate every quantity table / list in the document "
              "(they may be in odd places, inside sentences, or split across pages), then the PO numbers and dates, then the header parties.")
@@ -86,19 +86,24 @@ def models(image: bool) -> tuple[str | None, str | None]:
 
 
 def checked_read(*, text=None, image_png=None, images_png=None, det=None, log, partial=False, context=''):
-    model=os.getenv('OPENCODE_FAST_MODEL','opencode/mimo-v2.6-flash-free')
+    if config.llm_provider()=='openrouter':
+        from .openrouter_provider import configured_model
+        model=configured_model(bool(images_png) or image_png is not None)
+    else:model=os.getenv('OPENCODE_FAST_MODEL','opencode/mimo-v2.6-flash-free')
     llm.CURRENT.vote='A'
     extra=''
     if partial:
         extra+='\nThis is a continuation chunk. Extract ONLY item rows in this chunk. Printed PO totals cover the whole PO and will be checked after merging. Never repeat earlier rows. Keep any printed totals exactly as shown.'
     if context:
         extra+='\nIDENTIFICATION CONTEXT ONLY (do not extract or repeat item rows from this context):\n'+context
-    read=lambda repair:llm.read_page(text=text,image_png=image_png,model=model,extra=extra+repair,**({'images_png':images_png} if images_png is not None else {}))
+    def read(repair):
+        llm.CURRENT.vote='Retry' if repair else 'A'
+        return llm.read_page(text=text,image_png=image_png,model=model,extra=extra+repair,**({'images_png':images_png} if images_png is not None else {}))
     data,errors,attempts=guard.ai_extract_with_guard(read,text,log,max_repairs=1,det=det,partial=partial,check_coverage=True)
     status='needs_review' if errors else 'checked'
     log(f'Chunk checks: {status}; reads={attempts}')
     return {'status':status,'disagreements':[],'arithmetic_errors':guard.arithmetic_errors(data,check_totals=not partial),
-            'votes':{'a':{'data':data,'guard_errors':errors,'attempts':attempts,'model':model},
+            'votes':{'a':{'data':data,'guard_errors':errors,'attempts':attempts,'model':getattr(llm.CURRENT,'used_model',model) if config.llm_provider()=='openrouter' else model},
                      'b':{'data':None,'guard_errors':[],'attempts':0,'model':None},'deterministic':det},'chosen':'a'}
 
 def dual_read(*, text: str | None = None, image_png: bytes | None = None, images_png=None, det: dict | None, log,partial=False,context='') -> dict:

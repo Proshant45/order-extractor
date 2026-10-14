@@ -253,6 +253,8 @@ def test_dual_read_consensus(client, monkeypatch):
     page = client.get(f"/orders/{oid}").text; assert "const HL=" in page and "q|" in page   # second-read differences become field highlights
 
 def test_worker_queue_pull_model(client, monkeypatch):
+    monkeypatch.setenv('EXTRACTOR','queue')
+    monkeypatch.setenv('AI_READ_MODE','dual')
     import threading, time, json as _j, copy
     from app import db, config as cfg, llm
     monkeypatch.setenv("WORKER_TOKEN", "w" * 40); monkeypatch.setenv("AI_QUEUE", "1")

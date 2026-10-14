@@ -75,9 +75,10 @@ function renderProgress(p) {
   target.innerHTML=`<div class="eta"><b>${head}</b> · ${p.finished}/${p.total} files resolved · ${p.reads_done || 0}/${p.reads_total || 0} tracked AI reads returned${p.reads_failed?' · '+p.reads_failed+' reads failed/cancelled':''}${p.reads_queued?' · '+p.reads_queued+' AI reads queued for worker':''}${p.files_pending?' · '+p.files_pending+' files awaiting preparation':''}${p.files_retrying?' · '+p.files_retrying+' files awaiting retry':''}<span id="stream-state" class="muted"></span></div>${p.error?'<p>'+esc(p.error)+'</p>':''}<progress class="batch-progress" max="${Math.max(1,p.total || 0)}" value="${p.finished || 0}" aria-label="Files resolved"></progress><table class="grid flow">`+p.files.map(f=>{
     const jobs=f.reads?.jobs || [];
     const active=jobs.filter(j=>j.status==='leased');
-    const details=jobs.length?'<details><summary>'+f.reads.done+'/'+f.reads.total+' reads returned'+(f.reads.failed?' · '+f.reads.failed+' failed/cancelled':'')+'</summary>'+jobs.map(j=>`<div>Read ${esc(j.vote || '?')} · pages ${esc(j.page || '?')} · ${esc(j.worker || 'unclaimed')} · ${esc(STAGE_LABELS[j.stage] || j.stage || j.status)}${j.received_at?' · received '+esc(timeLabel(j.received_at)):''}${j.started_at?' · started '+esc(timeLabel(j.started_at)):''}${j.returned_at?' · returned '+esc(timeLabel(j.returned_at)):''}${j.error?' · '+esc(j.error):''}</div>`).join('')+'</details>':'';
+    const details=jobs.length?'<details><summary>'+f.reads.done+'/'+f.reads.total+' reads returned'+(f.reads.failed?' · '+f.reads.failed+' failed/cancelled':'')+'</summary>'+jobs.map(j=>`<div>${j.vote==='Retry'?'Repair read':'Read '+esc(j.vote || '?')} · pages ${esc(j.page || '?')} · ${esc(j.worker || 'unclaimed')} · ${esc(j.model || '')} · ${esc(STAGE_LABELS[j.stage] || j.stage || j.status)}${j.received_at?' · received '+esc(timeLabel(j.received_at)):''}${j.started_at?' · started '+esc(timeLabel(j.started_at)):''}${j.returned_at?' · returned '+esc(timeLabel(j.returned_at)):''}${j.error?' · '+esc(j.error):''}</div>`).join('')+'</details>':'';
     const worker=active.map(j=>j.worker).filter(Boolean).join(', ');
-    const marks=[['Queued',jobs.length>0],['Worker received',jobs.some(j=>j.received_at || j.worker)],['AI started',jobs.some(j=>j.started_at)],['Result returned',(f.reads?.done || 0)>0],['Order saved',f.step==='saved']];
+    const direct=jobs.some(j=>j.worker==='OpenRouter');
+    const marks=[[direct?'Prepared':'Queued',jobs.length>0],[direct?'API requested':'Worker received',jobs.some(j=>j.received_at || j.worker)],['AI started',jobs.some(j=>j.started_at)],['Result returned',(f.reads?.done || 0)>0],['Order saved',f.step==='saved']];
     const chain='<div class=\"milestones\">'+marks.map(([label,done])=>`<span class=\"${done?'done':''}\">${esc(label)}</span>`).join(' › ')+'</div>';
     return `<tr><td>${esc(f.name)}</td><td class="stage-cell">${esc(STAGE_LABELS[f.worker_stage] || f.step)}${worker?' · '+esc(worker):''}${f.order_id?` · <a href="/orders/${Number(f.order_id)}">Open order</a>`:''}${chain}${details}</td><td>${esc(f.reason)}</td></tr>`;
   }).join('')+'</table>';
@@ -107,13 +108,24 @@ async function aiStatus() {
   try {
     const w=await jsonRequest('/api/ai-status');
     const limit=w.processing_limit;if(limit)document.getElementById('file-budget').textContent=`System processing limit: ${limit.limit} files total · ${limit.used} used · ${limit.remaining} remaining.`;
-    const badge=document.getElementById('aiw');badge.className='pill '+(w.online?'done':'failed');
+    const badge=document.getElementById('aiw');
+    if(w.reader==='openrouter') {
+      badge.className='pill '+(w.configured?'':'failed');
+      badge.textContent='OpenRouter · '+(!w.configured?'key missing':w.waiting_retry?'waiting for free API retry':'key configured')+' · '+w.running_api_reads+' reads running';
+      const status=document.getElementById('st_online');status.textContent=w.configured?'Key configured':'OPENROUTER_API_KEY missing';status.className=badge.className;
+      document.getElementById('st_seen').textContent=w.waiting_retry?'Waiting for retry window':'No retry pending';
+      document.getElementById('st_q').textContent=w.running_api_reads;
+      document.getElementById('st_qf').textContent=w.queued_files;
+      document.getElementById('st_c').textContent=w.cached;
+      return;
+    }
+    badge.className='pill '+(w.online?'done':'failed');
     badge.textContent='AI worker '+(w.online?'online':'offline')+' · '+w.queued+' queued / '+w.leased+' running';
     const status=document.getElementById('st_online');status.textContent=w.online?'online':'offline';status.className=badge.className;
     document.getElementById('st_seen').textContent=w.last_seen_s==null?'never':w.last_seen_s+'s ago';
     document.getElementById('st_q').textContent=w.queued+' / '+w.leased;
     document.getElementById('st_qf').textContent=w.queued_files;
     document.getElementById('st_c').textContent=w.cached;
-  } catch(error) {document.getElementById('aiw').textContent='AI worker status unverified';}
+  } catch(error) {document.getElementById('aiw').textContent='AI status unverified';}
 }
 setInterval(prog,5000);setInterval(aiStatus,10000);

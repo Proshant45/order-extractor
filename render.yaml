@@ -13,10 +13,12 @@ services:
         value: /var/data
       - key: MAX_UPLOAD_MB
         value: "25"
+      - key: EXTRACTOR
+        value: openrouter
       - key: AI_QUEUE
-        value: "1"
-      - key: WORKER_TOKEN
-        sync: false          # same value as worker/.env on the box
+        value: "0"
+      - key: OPENROUTER_API_KEY
+        sync: false
       - key: APP_USERNAME
         sync: false
       - key: APP_PASSWORD_HASH

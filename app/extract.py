@@ -297,7 +297,7 @@ def extract_ai_primary(path: Path, kind: str, log, ctx) -> tuple[dict, str]:
         chunks=list(_text_chunks(txt));ctx['_document_text']=txt;ctx['_document_det']=det
         units=[{'text':chunk,'page':f'text {i+1}/{len(chunks)}','det':det if len(chunks)==1 else None,
                 'partial':len(chunks)>1,'context':_po_context(txt) if i else ''} for i,chunk in enumerate(chunks)]
-    checked=os.getenv('AI_READ_MODE','checked' if config.llm_provider() in ('queue','opencode') else 'dual')=='checked'
+    checked=config.llm_provider()=='openrouter' or os.getenv('AI_READ_MODE','checked' if config.llm_provider() in ('queue','opencode') else 'dual')=='checked'
     A, B, dis, arith, gerr, status, used_det = [], [], [], [], [], "checked" if checked else "accepted", False
     owner = getattr(llm.CURRENT, "owner", None)
     file_id = getattr(llm.CURRENT,"file_id",None)
@@ -308,9 +308,15 @@ def extract_ai_primary(path: Path, kind: str, log, ctx) -> tuple[dict, str]:
             return consensus.checked_read(text=u.get('text'),image_png=u.get('image'),images_png=u.get('images'),det=u['det'],log=log,partial=u.get('partial',False),context=u.get('context',''))
         return consensus.dual_read(text=u.get("text"), image_png=u.get("image"), images_png=u.get('images'),det=u["det"], log=log,partial=u.get('partial',False),context=u.get('context',''))
     from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=int(os.getenv("AI_PAGE_PARALLEL", "1" if checked else "2"))) as ex:
-        units = list(units)
-        results = list(ex.map(_one, units))      # pages read concurrently, merged in page order
+    parallel=int(os.getenv('AI_PAGE_PARALLEL','1' if checked else '2'))
+    if checked and parallel==1:
+        kept=[];results=[]
+        for unit in units:
+            results.append(_one(unit));kept.append({'det':unit['det'],'page':unit['page']})
+        units=kept
+    else:
+        with ThreadPoolExecutor(max_workers=parallel) as ex:
+            units=list(units);results=list(ex.map(_one,units))
     for u, r in zip(units, results):
         used_det = used_det or u["det"] is not None
         A.append(r["votes"]["a"]["data"]); B.append(r["votes"]["b"]["data"] or {})
@@ -345,7 +351,7 @@ def extract_ai_primary(path: Path, kind: str, log, ctx) -> tuple[dict, str]:
                         "models": ctx.get("models"), "version_a": a, "version_b": b,
                         "deterministic_vote": used_det}
     ctx["guard_errors"] = arith + gerr
-    return a, f"{kind}_ai_checked" if checked else f"{kind}_ai_dual"
+    return a, f'{kind}_openrouter_checked' if config.llm_provider()=='openrouter' else (f"{kind}_ai_checked" if checked else f"{kind}_ai_dual")
 
 def preview_text(path: Path, kind: str) -> str | None:
     """Cheap, bounded text for classification (first 3 pages / first rows)."""

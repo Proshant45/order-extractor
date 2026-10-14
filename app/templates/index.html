@@ -1,6 +1,6 @@
 {% extends "base.html" %}{% block body %}
 <header class="top"><div><h1>Order Book</h1><div class="crumb">Dashboard &gt; <b>Order Book</b></div></div>
-<div id="aiw" class="pill {{ 'done' if ws.online else 'failed' }}">AI worker {{ 'online' if ws.online else 'offline' }}{% if ws.last_seen_s is not none %} · seen {{ws.last_seen_s}}s ago{% endif %} · queue {{ws.queued}}</div></header>
+{% if ai.reader == 'openrouter' %}<div id="aiw" class="pill {{ 'failed' if not ai.configured else '' }}">OpenRouter · {{ 'key missing' if not ai.configured else 'waiting for free API retry' if ai.waiting_retry else 'key configured' }} · {{ai.running_api_reads}} reads running</div>{% else %}<div id="aiw" class="pill {{ 'done' if ws.online else 'failed' }}">AI worker {{ 'online' if ws.online else 'offline' }}{% if ws.last_seen_s is not none %} · seen {{ws.last_seen_s}}s ago{% endif %} · queue {{ws.queued}}</div>{% endif %}</header>
 <section class="card"><h3>Auto Extract from document</h3>
 <form id="up" class="drop"><input type="file" name="file" id="f" accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.xlsx,.csv,.docx,.zip">
 <button class="btn dark" type="submit">Upload &amp; Extract</button><span class="hint">One file at a time (or a .zip). PDF, image, XLSX, CSV, DOCX. Max {{max_mb}} MB per file.</span></form>
@@ -22,12 +22,18 @@
 <td class="document-actions"><a class="btn ghost sm" href="/files/{{f.id}}">View document</a>{% if f.source_available %}<a class="btn ghost sm" href="/api/files/{{f.id}}/source?download=1">Download</a>{% endif %}{% if f.order_id %}<a class="btn blue sm" href="/orders/{{f.order_id}}">Open order</a>{% endif %}</td></tr>
 {% else %}<tr><td colspan="4" class="muted">No documents uploaded yet.</td></tr>{% endfor %}</tbody></table></section>
 <section class="card" id="status"><h3>AI reader status</h3>
-<table class="grid kv"><tr><td>AI reader</td><td>opencode on the local worker box (pulls jobs from this app over HTTPS)</td></tr>
+<table class="grid kv">{% if ai.reader == 'openrouter' %}
+<tr><td>AI reader</td><td>OpenRouter · free models only · direct API</td></tr>
+<tr><td>Text model</td><td>{{ ai.model_a }}</td></tr><tr><td>Image model</td><td>{{ ai.model_image }}</td></tr>
+<tr><td>API configuration</td><td><span id="st_online" class="pill">{{ 'Key configured' if ai.configured else 'OPENROUTER_API_KEY missing' }}</span></td></tr>
+<tr><td>API retry</td><td id="st_seen">{{ 'Waiting for retry window' if ai.waiting_retry else 'No retry pending' }}</td></tr>
+<tr><td>Running AI reads</td><td id="st_q">{{ ai.running_api_reads }}</td></tr>
+{% else %}<tr><td>AI reader</td><td>opencode on the worker box</td></tr>
 <tr><td>Read A (text)</td><td>{{ ai.model_a }}</td></tr><tr><td>Read B (text)</td><td>{{ ai.model_b }}</td></tr><tr><td>Images / scans (A and B)</td><td>{{ ai.model_image }}</td></tr>
 <tr><td>Worker</td><td><span id="st_online" class="pill {{ 'done' if ws.online else 'failed' }}">{{ 'online' if ws.online else 'offline' }}</span></td></tr>
 <tr><td>Last heartbeat</td><td id="st_seen">{{ (ws.last_seen_s|string + 's ago') if ws.last_seen_s is not none else 'never' }}</td></tr>
 <tr><td>Queued / running AI jobs</td><td id="st_q">{{ ws.queued }} / {{ ws.leased }}</td></tr>
-<tr><td>Files waiting for the worker</td><td id="st_qf">{{ ai.queued_files }}</td></tr>
+{% endif %}<tr><td>Files waiting for AI</td><td id="st_qf">{{ ai.queued_files }}</td></tr>
 <tr><td>Results served from cache</td><td id="st_c">{{ ai.cached }}</td></tr></table>
 <p class="muted">Extracted orders are saved as drafts. Checked means the chunk reads passed available numeric checks. Two reads agree applies only to independent dual reads. Review warnings and missing fields before using the order.</p></section>
 <script src="/static/list.js"></script><script>prog();</script>{% endblock %}

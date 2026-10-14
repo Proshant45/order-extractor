@@ -48,6 +48,9 @@ def read_page(*, image_png: bytes | None = None, images_png: list[bytes] | None 
     if text is not None:
         if len(text) > 60000:
             raise ValueError(f"document text too large for one read ({len(text)} chars); split required, no text discarded")
+    if prov=='openrouter':
+        from . import openrouter_provider
+        return openrouter_provider.read(instructions,text=text,images=images,model=model)
     if prov == "queue":
         payload=pack_images(images) if len(images)>1 else (images[0] if images else None)
         return _json(queue_read(instructions,text=text,image_png=payload,model=model or default_model))

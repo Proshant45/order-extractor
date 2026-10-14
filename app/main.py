@@ -115,6 +115,9 @@ def process_one(path: Path, name: str, parent_id=None, size=None, sha=None, forc
     """Extract + validate + store one file. Never raises: failures become 'skipped'/'failed' records."""
     sha = sha or _sha256(path)
     hit = None if force_ai or os.getenv("DISABLE_CACHE") == "1" else db.cached_result(sha)
+    previous_budget=None
+    if hit and config.llm_provider()=='openrouter' and 'openrouter' not in (hit.get('method') or ''):
+        previous_budget=hit['file_id'];hit=None
     if hit and hit['method']=='classify' and config.llm_provider() is not None:
         hit=None
     if hit:   # identical bytes already extracted: serve stored result, no AI job
@@ -132,6 +135,7 @@ def process_one(path: Path, name: str, parent_id=None, size=None, sha=None, forc
         return out
     fid = db.add_file(name, size=size or path.stat().st_size, sha=sha, parent_id=parent_id)
     documents.attach_source(fid,path,sha)
+    if previous_budget is not None:db.copy_file_budget(previous_budget,fid)
     db.recover_file_budget(fid,sha,name)
     if on_file: on_file(fid)
     llm.CURRENT.file_id = fid
@@ -171,7 +175,7 @@ def process_one(path: Path, name: str, parent_id=None, size=None, sha=None, forc
         meta = {"doc_type": str(e), "buyer_hint": ctx.get("buyer_hint"), **(ctx.get("refs") or {})}
         if ctx.get('document'):
             meta.update(document=ctx['document'],original_document=ctx['document'],document_review='needs_review')
-        method=f'{kind}_document_ai' if ctx.get('document') else 'classify'
+        method=f'{kind}_document_openrouter' if ctx.get('document') and config.llm_provider()=='openrouter' else f'{kind}_document_ai' if ctx.get('document') else 'classify'
         db.update_file(fid, status="classified", method=method, doc_type=str(e), meta=json.dumps(meta))
         lg(f"stored {e} document data" if ctx.get('document') else f"identified {e}; structured data unavailable")
         return {"file_id": fid, "name": name, "status": "classified", "doc_type": str(e), "category": ctx["category"], "meta": meta,"method":method}
@@ -444,6 +448,7 @@ import base64 as _b64
 def worker_pending(owner: str = "", worker: str = "tick"):
     """Cheap check for the box cron tick. Only counts jobs uploaded by the configured app account."""
     acct = os.getenv("APP_USERNAME", "")
+    if config.llm_provider()=='openrouter':return {'pending':0,'owner':owner,'note':'OpenRouter reads run directly on the web app'}
     if owner != acct:
         return {"pending": 0, "owner": owner, "note": "only jobs of the app account are served"}
     db.heartbeat(worker, "polling")
@@ -451,6 +456,7 @@ def worker_pending(owner: str = "", worker: str = "tick"):
 
 @app.get("/api/worker/next")
 def worker_next(worker: str = "box", owner: str = "", image_batches:int=0):
+    if config.llm_provider()=='openrouter':return Response(status_code=204)
     db.heartbeat(worker)
     acct = os.getenv("APP_USERNAME", "")
     if owner != acct:
@@ -500,6 +506,12 @@ def worker_status_api():
     return db.worker_status()
 
 def ai_info():
+    if config.llm_provider()=='openrouter' or os.getenv('EXTRACTOR','openrouter').lower()=='openrouter':
+        from .openrouter_provider import configured_model,ready_for_retry
+        with db.conn() as c:active=c.execute("SELECT COUNT(*) FROM ai_jobs WHERE transport='openrouter' AND status='leased'").fetchone()[0]
+        return {'reader':'openrouter','configured':bool(os.getenv('OPENROUTER_API_KEY')),'model_a':configured_model(),
+                'model_b':None,'model_image':configured_model(True),'running_api_reads':active,
+                'waiting_retry':not ready_for_retry(),'queued_files':len(db.queued_files()),'cached':db.cached_count()}
     return {"model_a": os.getenv("OPENCODE_MODEL", "opencode/big-pickle"), "model_b": os.getenv("OPENCODE_MODEL_B", "opencode/mimo-v2.6-flash-free"),
             "model_image": os.getenv("OPENCODE_VISION_MODEL", "opencode/mimo-v2.6-flash-free"),
             "queued_files": len(db.queued_files()), "cached": db.cached_count()}
@@ -518,7 +530,11 @@ def _retry_loop():
     while True:
         time.sleep(int(os.getenv("AI_RETRY_S", "60")))
         try:
-            if config.llm_provider() != "queue" or not db.worker_online():
+            provider=config.llm_provider()
+            if provider=='openrouter':
+                from .openrouter_provider import ready_for_retry
+                if not ready_for_retry():continue
+            elif provider!='queue' or not db.worker_online():
                 continue
             for f in db.queued_files():
                 qp = next((config.DATA_DIR / "queue").glob(f"{f['id']}.*"), None) or (config.DATA_DIR / "queue" / str(f["id"]))
