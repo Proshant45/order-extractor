@@ -8,8 +8,8 @@ import httpx
 from . import config, db
 
 BASE='https://openrouter.ai/api/v1'
-DEFAULT_MODEL='dots-studio/dots-3-note-preview:free'
-DEFAULT_FALLBACK='google/gemma-4-31b-it:free'
+DEFAULT_MODEL='google/gemma-4-31b-it:free'
+DEFAULT_FALLBACK='dots-studio/dots-3-note-preview:free'
 _catalog=None
 _catalog_at=0
 _catalog_lock=threading.Lock()
