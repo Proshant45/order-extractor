@@ -65,7 +65,7 @@ def test_lease_renew(tmp_path, monkeypatch):
 
 def test_po_boundary_grouping():
     from app.extract import _po_groups
-    assert _po_groups(["Purchase Order: PO1\nx", "more", "Purchase Order: PO2"]) == [(0, 3, 2)]   # few POs: one read
+    assert _po_groups(["Purchase Order: PO10001\nx", "more", "Purchase Order: PO10002"]) == [(0, 3, 2)]   # few POs: one read
     pages = [f"Purchase Order: PO{i:05d}" for i in range(10)]
     g = _po_groups(pages)
     assert g[0][0] == 0 and g[-1][1] == 10 and all(b > a for a, b, _ in g) and len(g) == 3
