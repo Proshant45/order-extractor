@@ -12,11 +12,9 @@ in a Texora360-style New Order page you can review, edit and save. Login require
 2. **Cache**: every file / ZIP entry is hashed (SHA-256). Identical bytes already extracted are served from the stored result (`cached`).
 3. **Classify**: purchase_order, sales_contract, proforma_invoice, control_sheet, tech_pack, bom, other. Order-type documents are extracted;
    tech packs / BOMs / other are stored with their type and style/PO references and linked per buyer (`GET /api/links`).
-4. **Dual AI read**: each order document is read twice independently by opencode free models (text: read A and read B use different models
-   and prompt framing; images/scans: the vision model with two prompt framings). Reads are compared field by field after normalisation.
-   When a known layout parser recognises the document it is a third cross-check, never the sole source.
-   **Auto-accepted** only if both reads agree on every field and arithmetic holds (size sums = qty, qty x rate = value, lines = stated totals).
-   Anything else is **needs_review**: both versions are stored and the order page shows differing fields side by side with the source page.
+4. **AI read**: each order document is read by opencode free models and saved as an order straight away (read A).
+   A second independent read (read B) is compared field by field; fields where it differs are lightly highlighted in the
+   order form (hover shows read B's value). There is no review queue. Arithmetic checks (size sums, qty x rate, totals) show as warnings.
 5. **Store**: SQLite tables `files`, `orders`, `pos`, `po_lines`, `extraction_logs`, `ai_jobs`, `batches`, `kv`.
 
 ## AI worker (pull model)
@@ -36,6 +34,7 @@ If the worker is offline, files are marked `queued_ai` and re-processed automati
 last heartbeat, queued jobs and cached results.
 
 ## API
+- Orders CRUD: `GET /api/orders?q=`, `POST /api/orders`, `GET/PUT/DELETE /api/orders/{id}`. UI: `/` (list + search + upload), `/orders/new`, `/orders/{id}` (edit/save/delete)
 - `POST /api/extract?wait=0` -> `{batch_id}`; `GET /api/batches/{id}?view=api` -> `{summary, results:[{status, file, format, doc_type, cached,
   order, pos, lines, totals, validation, agreement:{status, models, disagreements}, versions}]}`
 - `POST /api/upload`, `GET /api/orders`, `GET/PUT /api/orders/{id}`, `GET /api/files`, `GET /api/links`, `GET /api/ai-status`, `GET /healthz` (public)

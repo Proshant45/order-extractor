@@ -399,8 +399,27 @@ async def api_extract(request: Request, file: UploadFile = File(...), reader: st
     return {"summary": res["summary"], "results": [api_view(i) for i in res["items"]]}
 
 @app.get("/api/orders")
-def api_orders():
-    return db.list_orders()
+def api_orders(q: str = ""):
+    return db.list_orders(q or None)
+
+def _parse_order(body):
+    try:
+        return Order.model_validate(body), None
+    except ValidationError as e:
+        return None, JSONResponse({"errors": [f"{'.'.join(map(str, x['loc']))}: {x['msg']}" for x in e.errors()]}, 422)
+
+@app.post("/api/orders", status_code=201)
+async def api_create(req: Request):
+    order, err = _parse_order(await req.json())
+    if err: return err
+    w = warnings_for(order)
+    oid = db.save_order(order, w)
+    return {"ok": True, "id": oid, "warnings": w}
+
+@app.delete("/api/orders/{oid}")
+def api_delete(oid: int):
+    if not db.delete_order(oid): raise HTTPException(404)
+    return {"ok": True}
 
 @app.get("/api/orders/{oid}")
 def api_order(oid: int):
@@ -411,16 +430,11 @@ def api_order(oid: int):
 @app.put("/api/orders/{oid}")
 async def api_save(oid: int, req: Request):
     if not db.get_order(oid): raise HTTPException(404)
-    try:
-        order = Order.model_validate(await req.json())
-    except ValidationError as e:
-        return JSONResponse({"errors": [f"{'.'.join(map(str, x['loc']))}: {x['msg']}" for x in e.errors()]}, 422)
+    order, err = _parse_order(await req.json())
+    if err: return err
     w = warnings_for(order)
     db.save_order(order, w, order_id=oid)
-    o = db.get_order(oid); rv = o.get("review") or {}
-    rv["human_reviewed_by"] = getattr(req.state, "user", None); rv["status_before_review"] = rv.get("status")
-    db.set_review(oid, "reviewed", rv)
-    return {"ok": True, "warnings": w}
+    return {"ok": True, "id": oid, "warnings": w}
 
 @app.get("/api/links")
 def api_links():
@@ -444,12 +458,31 @@ def api_logs(fid: int):
     return db.file_logs(fid)
 
 @app.get("/", response_class=HTMLResponse)
-def index(request: Request):
-    return tpl.TemplateResponse(request, "index.html", {"orders": db.list_orders(), "files": db.list_files(), "ws": db.worker_status(), "ai": ai_info(),
+def index(request: Request, q: str = ""):
+    return tpl.TemplateResponse(request, "index.html", {"orders": db.list_orders(q or None), "q": q, "files": db.list_files(), "ws": db.worker_status(), "ai": ai_info(),
                                 "llm": config.llm_provider(), "max_mb": config.MAX_UPLOAD_MB, "active": "book"})
+
+EMPTY = {"id": None, "buyer_name": None, "brand": None, "style_number": None, "factory": None, "planned_line": 1, "fob": None, "smv": None,
+         "cm": None, "department": None, "sizes": [], "colors": [], "currency": None, "warnings": [], "pos": [], "file_name": None, "method": None, "review": None}
+
+@app.get("/orders/new", response_class=HTMLResponse)
+def order_new(request: Request):
+    return tpl.TemplateResponse(request, "order.html", {"o": EMPTY, "hl": {}, "active": "book"})
+
+def _highlights(o):
+    """Fields where the second AI read differed: {field_key: other_value}, shown as a subtle hint in the form."""
+    out = {}
+    for d in ((o.get("review") or {}).get("disagreements") or []):
+        f = d.get("field") or ""
+        m = re.match(r"PO\[(.+?)\]\.line\[(.+?)\|.*?\]\.size\[(.+?)\]$", f)
+        if m: out[f"q|{m[1]}|{m[2]}|{m[3]}"] = d.get("b"); continue
+        m = re.match(r"PO\[(.+?)\]\.(\w+)$", f)
+        if m: out[f"po|{m[1]}|{m[2]}"] = d.get("b"); continue
+        if re.match(r"^\w+$", f): out[f"h|{f}"] = d.get("b")
+    return out
 
 @app.get("/orders/{oid}", response_class=HTMLResponse)
 def order_page(request: Request, oid: int):
     o = db.get_order(oid)
     if not o: raise HTTPException(404)
-    return tpl.TemplateResponse(request, "order.html", {"o": o, "llm": config.llm_provider(), "active": "book"})
+    return tpl.TemplateResponse(request, "order.html", {"o": o, "hl": _highlights(o), "active": "book"})

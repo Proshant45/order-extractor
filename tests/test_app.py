@@ -250,7 +250,7 @@ def test_dual_read_consensus(client, monkeypatch):
     assert any("size[M]" in f for f in fields) and "versions" in r
     assert j["summary"]["needs_review"] == 1
     oid = r["order"]["id"]
-    assert "Read A" in client.get(f"/orders/{oid}").text
+    page = client.get(f"/orders/{oid}").text; assert "const HL=" in page and "q|" in page   # second-read differences become field highlights
 
 def test_worker_queue_pull_model(client, monkeypatch):
     import threading, time, json as _j, copy
@@ -313,3 +313,20 @@ def test_sha_cache(client):
     data = _zip([("a/x1.pdf", PDF.read_bytes()), ("b/x2.pdf", PDF.read_bytes())])
     j = client.post("/api/extract", files={"file": ("dup.zip", data)}).json()
     assert j["summary"]["cached"] == 2 and all(r["cached"] for r in j["results"])
+
+def test_crud(client):
+    body = {"buyer_name": "Test Buyer", "style_number": "ST-1", "brand": "B", "factory": "F", "department": "D", "planned_line": 1,
+            "sizes": ["S", "M"], "colors": ["Navy"],
+            "pos": [{"po_number": "CRUD-1", "ship_date": "2026-12-01", "lines": [{"color": "Navy", "sizes": {"S": 10, "M": 20}, "rate": 2.5}]}]}
+    r = client.post("/api/orders", json=body); assert r.status_code == 201; oid = r.json()["id"]
+    o = client.get(f"/api/orders/{oid}").json(); assert o["buyer_name"] == "Test Buyer" and o["pos"][0]["lines"][0]["sizes"] == {"S": 10, "M": 20}
+    lst = client.get("/api/orders", params={"q": "CRUD-1"}).json(); assert [x["id"] for x in lst] == [oid] and lst[0]["qty"] == 30
+    body["buyer_name"] = "Edited"; body["pos"][0]["lines"][0]["sizes"]["S"] = 11
+    assert client.put(f"/api/orders/{oid}", json=body).status_code == 200
+    o = client.get(f"/api/orders/{oid}").json(); assert o["buyer_name"] == "Edited" and o["pos"][0]["lines"][0]["sizes"]["S"] == 11
+    assert client.put(f"/api/orders/{oid}", json={"pos": [{"po_number": "x", "lines": [{"color": "a", "sizes": {"S": "abc"}}]}]}).status_code == 422
+    assert client.get("/orders/new").status_code == 200 and client.get(f"/orders/{oid}").status_code == 200
+    assert "Edited" in client.get("/", params={"q": "Edited"}).text
+    assert client.delete(f"/api/orders/{oid}").status_code == 200
+    assert client.get(f"/api/orders/{oid}").status_code == 404 and client.delete(f"/api/orders/{oid}").status_code == 404
+    assert "needs review" not in client.get("/").text.lower()

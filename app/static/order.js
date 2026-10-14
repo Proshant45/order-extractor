@@ -3,10 +3,10 @@ const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const iso2dmy=d=>d?d.split('-').reverse().join('/'):'';
 const dmy2iso=d=>{d=d.trim();if(!d)return null;const m=d.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})$/);if(!m)return d;const y=m[3].length==2?'20'+m[3]:m[3];return `${y}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`};
-let sizes=O.sizes.length?O.sizes:['XS','S','M','L','XL'];
-function init(){H.forEach(k=>$(k).value=O[k]??'');$('sizes').value=sizes.join(', ');$('colors').value=O.colors.join(', ');
+let sizes=(O.sizes&&O.sizes.length)?O.sizes:['XS','S','M','L','XL'];
+function init(){H.forEach(k=>$(k).value=O[k]??'');$('sizes').value=sizes.join(', ');$('colors').value=(O.colors||[]).join(', ');
  $('sizes').onchange=()=>{const cur=collect();sizes=$('sizes').value.split(',').map(s=>s.trim()).filter(Boolean);renderPOs(cur.pos)};
- renderPOs(O.pos);showWarn(O.warnings)}
+ renderPOs(O.pos.length?O.pos:(O.id?[]:[{po_number:'',lines:[]}]));showWarn(O.warnings)}
 function showWarn(w,err){$('warn').innerHTML=(err||[]).map(x=>`<div class="e">✖ ${esc(x)}</div>`).join('')+(w||[]).map(x=>`<div>⚠ ${esc(x)}</div>`).join('')}
 function lineRow(l,i){return `<tr><td>${i+1}</td><td><input class="color" value="${esc(l.color)}"><input type="hidden" class="meta" value="${esc(JSON.stringify({style:l.style,color_code:l.color_code,rate:l.rate,net_value:l.net_value,order_qty:l.order_qty}))}"><small class="muted">${esc(l.style||'')} ${l.rate!=null?'@ '+l.rate:''}</small></td>`+
  sizes.map(s=>`<td><input class="q" data-s="${esc(s)}" value="${l.sizes?.[s]??''}" placeholder="Enter ${esc(s)}"></td>`).join('')+
@@ -36,6 +36,15 @@ function collect(){const o={};H.forEach(k=>o[k]=$(k).value.trim()||null);o.plann
   sales_contract_number:g('sales_contract_number'),stated_total_qty:g('stated_total_qty'),
   lines:[...po.querySelectorAll('tbody tr')].map(r=>{const m=JSON.parse(r.querySelector('.meta')?.value||'{}');const sz={};r.querySelectorAll('.q').forEach(q=>{if(q.value.trim()!=='')sz[q.dataset.s]=q.value.trim()});
    return {...m,color:r.querySelector('.color').value.trim(),sizes:sz}}).filter(l=>l.color||Object.keys(l.sizes).length)}});return o}
-async function save(){const r=await fetch('/api/orders/'+O.id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(collect())});const j=await r.json();
- if(!r.ok){showWarn([],j.errors||[j.detail]);return}showWarn(j.warnings);$('warn').insertAdjacentHTML('afterbegin','<div class="ok">✔ Saved</div>')}
-init();
+async function save(){const r=await fetch(O.id?'/api/orders/'+O.id:'/api/orders',{method:O.id?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(collect())});const j=await r.json().catch(()=>({}));
+ if(!r.ok){showWarn([],j.errors||[j.detail||'Save failed']);return}
+ if(!O.id){location.href='/orders/'+j.id;return}
+ showWarn(j.warnings);$('warn').insertAdjacentHTML('afterbegin','<div class="ok">✔ Saved</div>')}
+async function del(){if(!confirm('Delete this order? This cannot be undone.'))return;const r=await fetch('/api/orders/'+O.id,{method:'DELETE'});if(r.ok)location.href='/';else showWarn([],['Delete failed'])}
+function mark(el,v){if(!el)return;el.classList.add('alt');el.title='Second AI read: '+(v??'(empty)')}
+function highlights(){Object.entries(HL||{}).forEach(([k,v])=>{const p=k.split('|');
+ if(p[0]==='h')mark($(p[1]),v);
+ document.querySelectorAll('.po').forEach(po=>{if(po.querySelector('.po_number').value!==p[1])return;
+  if(p[0]==='po')mark(po.querySelector('.'+p[2]),v);
+  if(p[0]==='q')po.querySelectorAll('tbody tr').forEach(r=>{if(r.querySelector('.color').value===p[2])mark(r.querySelector(`.q[data-s="${CSS.escape(p[3])}"]`),v)})})})}
+init();highlights();

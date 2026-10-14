@@ -22,3 +22,8 @@ body.login{justify-content:center;align-items:center;min-height:100vh}.loginbox{
 .toast h4{margin:0 0 8px}.toast .x{float:right;cursor:pointer;border:0;background:none;font-size:16px}.toast table{width:100%;font-size:12px}.toast td{padding:2px 4px}
 .logout{margin:16px 6px 0}
 .pill.accepted{background:#dcf5e3;color:#167a33}.pill.needs_review{background:#fde2e2;color:#a12}.pill.reviewed{background:#e6efff;color:#1e5bb8}.review.needs_review{border-left:4px solid #d33}.review.accepted{border-left:4px solid #2a2}tr.bad td{background:#fff3f3}
+
+input.alt{background:#fff8e1;border-color:#f0c36d}
+.listhead{display:flex;align-items:center;gap:12px;justify-content:space-between}.listhead h3{margin:0}
+.search{display:flex;gap:6px;flex:1;max-width:460px}.search input{flex:1}
+td.num,th.num{text-align:right}td.act{white-space:nowrap}

@@ -5,9 +5,15 @@
 <form id="up" class="drop"><input type="file" name="file" id="f" accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.xlsx,.csv,.docx,.zip">
 <button class="btn dark" type="submit">Upload &amp; Extract</button><span class="hint">One file at a time (or a .zip). PDF, image, XLSX, CSV, DOCX. Max {{max_mb}} MB.</span></form>
 <div id="res"></div></section>
-<section class="card"><h3>Orders</h3><table class="grid"><thead><tr><th>#</th><th>Buyer</th><th>Style</th><th>Factory</th><th>PO(s)</th><th>Source file</th><th>Status</th><th>Agreement</th><th></th></tr></thead><tbody>
-{% for o in orders %}<tr><td>{{o.id}}</td><td>{{o.buyer_name or ''}}</td><td>{{o.style_number or ''}}</td><td>{{o.factory or ''}}</td><td>{{o.po_numbers or ''}}</td><td>{{o.file_name or ''}}</td><td><span class="pill {{o.status}}">{{o.status}}</span></td><td><span class="pill {{o.review_status}}">{{(o.review_status or "")|replace("_"," ")}}</span></td><td><a class="btn blue sm" href="/orders/{{o.id}}">Open</a></td></tr>
-{% else %}<tr><td colspan="8" class="muted">No orders yet. Upload a document above.</td></tr>{% endfor %}</tbody></table></section>
+<section class="card"><div class="listhead"><h3>Orders</h3>
+<form method="get" action="/" class="search"><input name="q" value="{{ q }}" placeholder="Search buyer, PO, style, file…"><button class="btn ghost sm">Search</button>{% if q %} <a href="/" class="btn ghost sm">Clear</a>{% endif %}</form>
+<a class="btn dark" href="/orders/new">＋ New Order</a></div>
+<table class="grid"><thead><tr><th>#</th><th>Buyer</th><th>Style</th><th>PO(s)</th><th class="num">Qty</th><th class="num">Value</th><th>Source</th><th>Updated</th><th></th></tr></thead><tbody>
+{% for o in orders %}<tr><td>{{o.id}}</td><td>{{o.buyer_name or ''}}</td><td>{{o.style_number or ''}}</td><td>{{o.po_numbers or ''}}</td>
+<td class="num">{{ "{:,}".format(o.qty or 0) }}</td><td class="num">{{ ("{:,.2f}".format(o.value) ~ ' ' ~ (o.currency or '')) if o.value else '' }}</td>
+<td>{{ o.file_name or 'manual' }}</td><td>{{ (o.updated_at or o.created_at or '')[:16]|replace('T',' ') }}</td>
+<td class="act"><a class="btn blue sm" href="/orders/{{o.id}}">Edit</a> <button class="btn ghost sm" onclick="delOrder({{o.id}},this)">Delete</button></td></tr>
+{% else %}<tr><td colspan="9" class="muted">{% if q %}No orders match “{{q}}”.{% else %}No orders yet. Upload a document above or create a New Order.{% endif %}</td></tr>{% endfor %}</tbody></table></section>
 <section class="card"><h3>Recent files</h3><table class="grid"><thead><tr><th>#</th><th>File</th><th>Type</th><th>Status</th><th>Doc type</th><th>Method / reason</th></tr></thead><tbody>
 {% for f in files %}<tr><td>{{f.id}}</td><td>{% if f.parent_id %}↳ {% endif %}{{f.name}}</td><td>{{f.kind or ''}}</td><td>{{f.doc_type or ''}}</td><td><span class="pill {{f.status}}">{{f.status}}</span></td><td>{{f.method or ''}} {{f.reason or ''}}{% if f.order_id %} <a href="/orders/{{f.order_id}}">order {{f.order_id}}</a>{% endif %}</td></tr>{% endfor %}</tbody></table></section>
 <section class="card" id="status"><h3>AI reader status</h3>
@@ -18,8 +24,9 @@
 <tr><td>Queued / running AI jobs</td><td id="st_q">{{ ws.queued }} / {{ ws.leased }}</td></tr>
 <tr><td>Files waiting for the worker</td><td id="st_qf">{{ ai.queued_files }}</td></tr>
 <tr><td>Results served from cache</td><td id="st_c">{{ ai.cached }}</td></tr></table>
-<p class="muted">Every order document is read twice independently and compared field by field; it is auto-accepted only when both reads agree and all totals check out, otherwise it is marked needs review.</p></section>
+<p class="muted">Every extracted document is saved as an order straight away. Fields where a second AI read saw something different are lightly highlighted in the order form.</p></section>
 <script>
+async function delOrder(id,b){if(!confirm('Delete order #'+id+'? This cannot be undone.'))return;const r=await fetch('/api/orders/'+id,{method:'DELETE'});if(r.ok)b.closest('tr').remove();else alert('Delete failed')}
 document.getElementById('up').onsubmit=async e=>{e.preventDefault();const f=document.getElementById('f').files[0];if(!f)return;
 const r=document.getElementById('res');r.innerHTML='<p class="muted">Extracting '+f.name+'…</p>';const fd=new FormData();fd.append('file',f);
 const resp=await fetch('/api/upload?wait=0',{method:'POST',body:fd});let j=await resp.json().catch(()=>({detail:resp.statusText}));
@@ -30,7 +37,7 @@ const S=j.summary,L={pdf_text:'PDF (text)',pdf_scanned:'PDF (scanned)',image:'Im
 const t=document.createElement('div');t.className='toast';t.id='summary';t.innerHTML=`<button class="x" onclick="this.parentNode.remove()">×</button><h4>Upload summary: ${S.upload}</h4>
 <table><tr><td>Files received</td><td><b>${S.files_received}</b></td></tr>${Object.entries(S.by_format).filter(([k,v])=>v).map(([k,v])=>`<tr><td>· ${L[k]}</td><td>${v}</td></tr>`).join('')}
 ${Object.entries(S.by_doc_type||{}).filter(([k,v])=>v).map(([k,v])=>`<tr><td>◦ ${k.replace('_',' ')}</td><td>${v}</td></tr>`).join('')}<tr><td>Classified only (tech pack/BOM/other)</td><td>${S.classified_only||0}</td></tr><tr><td>Served from cache (already extracted)</td><td>${S.cached||0}</td></tr><tr><td>Extracted OK</td><td><b style="color:#167a33">${S.extracted_ok}</b></td></tr><tr><td>Skipped</td><td><b style="color:#8a6100">${S.skipped}</b></td></tr>
-<tr><td>Queued for AI (worker offline)</td><td>${S.queued_ai||0}</td></tr><tr><td>Failed</td><td><b style="color:#a12">${S.failed}</b></td></tr><tr><td>Auto-accepted (A=B)</td><td><b style="color:#167a33">${S.accepted}</b></td></tr><tr><td>Needs review</td><td><b style="color:#a12">${S.needs_review}</b></td></tr><tr><td>Need AI reader</td><td>${S.need_ai}</td></tr><tr><td>Read by AI</td><td>${S.used_ai}</td></tr></table>
+<tr><td>Queued for AI (worker offline)</td><td>${S.queued_ai||0}</td></tr><tr><td>Failed</td><td><b style="color:#a12">${S.failed}</b></td></tr><tr><td>Need AI reader</td><td>${S.need_ai}</td></tr><tr><td>Read by AI</td><td>${S.used_ai}</td></tr></table>
 ${S.skipped_reasons.length?'<details open><summary>Skipped / failed reasons</summary><ul>'+S.skipped_reasons.map(x=>`<li>${x.name}: ${x.reason}</li>`).join('')+'</ul></details>':''}`;document.body.appendChild(t);
 r.innerHTML='<table class="grid"><tr><th>File</th><th>Status</th><th>Detail</th></tr>'+j.items.map(i=>`<tr><td>${i.name}</td><td><span class="pill ${i.status}">${i.status}</span></td><td>${i.order_id?`<a href="/orders/${i.order_id}">open order ${i.order_id}</a> `:''}${i.reason||''}${(i.warnings||[]).length?' · '+i.warnings.length+' warning(s)':''}</td></tr>`).join('')+'</table>';
 const done=j.items.filter(i=>i.order_id);};

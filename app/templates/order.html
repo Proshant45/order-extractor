@@ -1,16 +1,8 @@
 {% extends "base.html" %}{% block body %}
-<header class="top"><div><h1>New Order</h1><div class="crumb">Dashboard &gt; Order Book &gt; Add Order &gt; <b>New Order</b></div></div>
-<div><button class="btn ghost" onclick="save('draft')">💾 Save as Draft</button> <button class="btn dark" onclick="save('saved')">Add Now</button></div></header>
+<header class="top"><div><h1>{{ "Order #" ~ o.id if o.id else "New Order" }}</h1><div class="crumb">Dashboard &gt; <a href="/">Order Book</a> &gt; {{ "Edit Order" if o.id else "Add Order" }} &gt; <b>{{ "Order #" ~ o.id if o.id else "New Order" }}</b></div></div>
+<div>{% if o.id %}<button class="btn ghost" onclick="del()">🗑 Delete</button> {% endif %}<button class="btn ghost" onclick="save('draft')">💾 Save as Draft</button> <button class="btn dark" onclick="save('saved')">{{ "Save" if o.id else "Add Now" }}</button></div></header>
 <div id="warn" class="warnbox"></div>
-{% set rv = o.review or {} %}
-<section class="card review {{ o.review_status }}"><h3>AI agreement: <span class="pill {{o.review_status}}">{{ (o.review_status or 'unknown')|replace('_',' ') }}</span>
-<small class="muted">{% if rv.models %}A = {{rv.models.a}} · B = {{rv.models.b}}{% endif %}{% if rv.deterministic_vote %} · + layout parser cross-check{% endif %}</small></h3>
-{% if rv.reason %}<p>{{rv.reason}}</p>{% endif %}
-{% if rv.disagreements %}<table class="grid"><tr><th>Field</th><th>Source page</th><th>Read A</th><th>Read B</th><th>Layout check</th></tr>
-{% for d in rv.disagreements %}<tr class="bad"><td>{{d.field}}</td><td>{{d.page}}</td><td>{{d.a}}</td><td>{{d.b}}</td><td>{{d.deterministic if d.deterministic is not none else '—'}}</td></tr>{% endfor %}</table>{% endif %}
-{% for e in rv.arithmetic_errors or [] %}<div class="warnbox"><div class="e">✖ {{e}}</div></div>{% endfor %}
-{% if o.review_status == 'needs_review' %}<p class="muted">Form below is prefilled from read A. Correct the differing fields, then Save to mark it reviewed.</p>{% endif %}
-</section>
+
 <section class="card"><div class="row hdr">
 <label>Buyer Name *<input id="buyer_name"></label><label>Brand *<input id="brand" placeholder="Select a brand"></label>
 <label>Style Number *<input id="style_number"></label><label>Factory *<input id="factory"></label>
@@ -19,8 +11,8 @@
 <label>Style Image *<div class="upl">⤒ Upload style image<small>Accepted file type: JPEG, PNG</small></div></label></div></section>
 <section class="card"><div class="row three"><label>Department *<input id="department"></label><label>Size *<input id="sizes" title="comma separated"></label>
 <label>Color *<input id="colors" title="comma separated"></label><div class="acts"><button class="btn dark" onclick="addPO()">Add PO Breakdown ＋</button>
-<span class="btn blue">Auto Extract ✓ <small>{{o.method or ''}}</small></span></div></div>
+{% if o.method %}<span class="btn blue">Auto Extract ✓</span>{% endif %}</div></div>
 <p class="muted">Source: {{o.file_name or 'manual'}}</p></section>
 <div id="pos"></div>
 <div class="foot"><button class="btn ghost" onclick="save('draft')">💾 Save as Draft</button> <button class="btn dark" onclick="save('saved')">Add Now</button></div>
-<script>const O={{ o|tojson }};</script><script src="/static/order.js"></script>{% endblock %}
+<script>const O={{ o|tojson }};const HL={{ hl|tojson }};</script><script src="/static/order.js"></script>{% endblock %}

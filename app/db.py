@@ -109,11 +109,27 @@ def get_order(oid):
             o["pos"].append(p)
         return o
 
-def list_orders():
+def list_orders(q: str | None = None):
+    sql = """SELECT o.id,o.buyer_name,o.brand,o.style_number,o.factory,o.status,o.currency,o.created_at,o.updated_at,f.name file_name,
+          (SELECT GROUP_CONCAT(po_number, ', ') FROM pos WHERE order_id=o.id) po_numbers,
+          (SELECT COUNT(*) FROM pos WHERE order_id=o.id) n_pos,
+          (SELECT COALESCE(SUM((SELECT COALESCE(SUM(value),0) FROM json_each(l.sizes))),0) FROM po_lines l JOIN pos p ON p.id=l.po_id WHERE p.order_id=o.id) qty,
+          (SELECT SUM(COALESCE(l.net_value, l.rate*(SELECT SUM(value) FROM json_each(l.sizes)))) FROM po_lines l JOIN pos p ON p.id=l.po_id WHERE p.order_id=o.id) value
+          FROM orders o LEFT JOIN files f ON f.id=o.file_id"""
+    args = []
+    if q:
+        like = f"%{q.strip()}%"
+        sql += """ WHERE o.buyer_name LIKE ? OR o.style_number LIKE ? OR o.brand LIKE ? OR o.factory LIKE ? OR f.name LIKE ?
+                   OR EXISTS(SELECT 1 FROM pos WHERE order_id=o.id AND po_number LIKE ?)"""
+        args = [like] * 6
     with conn() as c:
-        return [dict(r) for r in c.execute("""SELECT o.id,o.review_status,o.buyer_name,o.style_number,o.factory,o.status,o.updated_at,f.name file_name,
-          (SELECT GROUP_CONCAT(po_number) FROM pos WHERE order_id=o.id) po_numbers,
-          (SELECT COUNT(*) FROM pos WHERE order_id=o.id) n_pos FROM orders o LEFT JOIN files f ON f.id=o.file_id ORDER BY o.id DESC""")]
+        return [dict(r) for r in c.execute(sql + " ORDER BY o.id DESC", args)]
+
+def delete_order(oid) -> bool:
+    with conn() as c:
+        c.execute("DELETE FROM po_lines WHERE po_id IN (SELECT id FROM pos WHERE order_id=?)", (oid,))
+        c.execute("DELETE FROM pos WHERE order_id=?", (oid,))
+        return c.execute("DELETE FROM orders WHERE id=?", (oid,)).rowcount == 1
 
 def list_files(limit=50):
     with conn() as c:
