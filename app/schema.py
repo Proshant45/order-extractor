@@ -1,7 +1,7 @@
 from __future__ import annotations
-import re
+import re, math
 from datetime import date, datetime
-from typing import Optional
+from typing import Optional, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 DATE_FORMATS = ("%d.%m.%Y", "%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%y", "%d.%m.%y", "%m/%d/%Y", "%d-%b-%Y", "%d %b %Y")
@@ -22,10 +22,16 @@ def parse_date(v):
 def to_num(v):
     if v in (None, ""):
         return None
-    if isinstance(v, (int, float)):
-        return v
-    s = str(v).replace(",", "").strip()
-    return float(s)
+    n = v if isinstance(v, (int, float)) else float(str(v).replace(",", "").strip())
+    if isinstance(v, bool) or not math.isfinite(n):
+        raise ValueError("number must be finite")
+    return n
+
+def to_qty(v):
+    n = to_num(v)
+    if n is not None and (n < 0 or n != int(n)):
+        raise ValueError("quantity must be a non-negative whole number")
+    return None if n is None else int(n)
 
 SIZE_ALIASES = {"SMALL": "S", "MEDIUM": "M", "MED": "M", "LARGE": "L", "XLARGE": "XL", "EXTRALARGE": "XL", "XSMALL": "XS",
                 "EXTRASMALL": "XS", "XXLARGE": "XXL", "2XL": "XXL", "XXXL": "3XL", "SM": "S", "LG": "L", "MD": "M"}
@@ -69,8 +75,7 @@ class POLine(BaseModel):
     @field_validator("order_qty", mode="before")
     @classmethod
     def _qty(cls, v):
-        n = to_num(v)
-        return None if n is None else int(n)
+        return to_qty(v)
 
     @field_validator("rate", "net_value", mode="before")
     @classmethod
@@ -105,8 +110,7 @@ class PO(BaseModel):
     @field_validator("stated_total_qty", mode="before")
     @classmethod
     def _q(cls, v):
-        n = to_num(v)
-        return None if n is None else int(n)
+        return to_qty(v)
 
     @field_validator("stated_total_value", mode="before")
     @classmethod
@@ -115,9 +119,11 @@ class PO(BaseModel):
 
     @property
     def total_qty(self):
-        return sum(sum(l.sizes.values()) for l in self.lines)
+        return sum(sum(l.sizes.values()) if l.sizes else (l.order_qty or 0) for l in self.lines)
 
 class Order(BaseModel):
+    status: Literal["draft", "saved"] = "draft"
+    style_image: Optional[str] = Field(default=None, max_length=3_000_000)
     buyer_name: Optional[str] = None
     brand: Optional[str] = None
     style_number: Optional[str] = None
@@ -139,6 +145,9 @@ class Order(BaseModel):
 
     @model_validator(mode="after")
     def _derive(self):
+        if not self.style_number:
+            styles = list(dict.fromkeys(l.style for p in self.pos for l in p.lines if l.style))
+            self.style_number = ", ".join(styles) or None
         if not self.sizes:
             seen = []
             for p in self.pos:
@@ -179,7 +188,7 @@ def warnings_for(order: Order) -> list[str]:
         if not p.lines:
             w.append(f"{tag}: no color/size lines")
         for l in p.lines:
-            s = sum(l.sizes.values())
+            s = sum(l.sizes.values()) if l.sizes else (l.order_qty or 0)
             if l.order_qty is not None and l.order_qty != s:
                 w.append(f"{tag} / {l.color}: order qty {l.order_qty} != sum of sizes {s}")
             if l.rate is not None and l.net_value is not None and abs(l.rate * s - l.net_value) > 0.01:

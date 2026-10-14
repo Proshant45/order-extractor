@@ -2,7 +2,7 @@ from __future__ import annotations
 import asyncio, hashlib, json, logging, os, re, tempfile, zipfile
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
@@ -37,7 +37,7 @@ async def require_login(request: Request, call_next):
     user = auth.read_session(request.cookies.get(auth.SESSION_COOKIE))
     bearer = request.headers.get("authorization", "")
     if not user and bearer.lower().startswith("bearer ") and auth.check_token(bearer[7:].strip()):
-        user = "api"
+        user = os.getenv("APP_USERNAME")
     if not user:
         if path.startswith("/api/") or path.startswith("/static/"):
             return JSONResponse({"detail": "login required"}, 401)
@@ -69,9 +69,11 @@ def logout():
 @app.on_event("startup")
 def _startup():
     db.init()
-    threading.Thread(target=_retry_loop, daemon=True).start()
     for p in config.TMP_DIR.glob("*"):   # stale temp files from a crash
-        p.unlink(missing_ok=True)
+        if p.is_file(): p.unlink(missing_ok=True)
+    db.recover_extractions()
+    _recover_batches()
+    threading.Thread(target=_retry_loop, daemon=True).start()
 
 @app.get("/healthz")
 def healthz():
@@ -106,10 +108,10 @@ def _sha256(path: Path) -> str:
             h.update(chunk)
     return h.hexdigest()
 
-def process_one(path: Path, name: str, parent_id=None, size=None, sha=None, force_ai=False) -> dict:
+def process_one(path: Path, name: str, parent_id=None, size=None, sha=None, force_ai=False, on_file=None) -> dict:
     """Extract + validate + store one file. Never raises: failures become 'skipped'/'failed' records."""
     sha = sha or _sha256(path)
-    hit = None if os.getenv("DISABLE_CACHE") == "1" else db.cached_result(sha)
+    hit = None if force_ai or os.getenv("DISABLE_CACHE") == "1" else db.cached_result(sha)
     if hit:   # identical bytes already extracted: serve stored result, no AI job
         fid = db.add_file(name, kind=hit["kind"], size=size or path.stat().st_size, sha=sha, parent_id=parent_id, status="cached",
                           reason=f"identical to file {hit['file_id']}")
@@ -123,6 +125,9 @@ def process_one(path: Path, name: str, parent_id=None, size=None, sha=None, forc
             out["meta"] = json.loads(hit["meta"])
         return out
     fid = db.add_file(name, size=size or path.stat().st_size, sha=sha, parent_id=parent_id)
+    if on_file: on_file(fid)
+    llm.CURRENT.file_id = fid
+    _prog_set(name, file_id=fid)
     lg = lambda m, lvl="info": db.log(fid, m, lvl)
     ctx = {"category": _cat_from_name(name), "force_ai": force_ai, "name": name,
            "buyer_hint": name.split("/")[1] if name.count("/") >= 2 else (name.split("/")[0] if "/" in name else None)}
@@ -206,6 +211,7 @@ def summarize(items, upload_name, zipped):
             "needs_review": sum(i.get("review_status") == "needs_review" for i in items),
             "failed": sum(i["status"] == "failed" for i in items),
             "queued_ai": sum(i["status"] == "queued_ai" for i in items),
+            "processing": sum(i["status"] == "processing" for i in items),
             "need_ai": sum(bool(i.get("need_ai")) for i in items),
             "used_ai": sum(bool(i.get("used_ai")) for i in items),
             "skipped_reasons": [{"name": i["name"], "reason": i.get("reason")} for i in items if i["status"] != "done"]}
@@ -247,7 +253,15 @@ def _prog_set(name, **kw):
 def progress(bid):
     import time as _t
     P = PROG.get(bid)
-    if not P: return None
+    persisted = db.get_batch(bid)
+    if not P:
+        batch = db.get_batch(bid)
+        if not batch or not batch.get("result") or "items" not in batch["result"]: return None
+        files = []
+        for item in batch["result"]["items"]:
+            stage = {"done":"saved","classified":"classified","skipped":"skipped","queued_ai":"queued"}.get(item["status"],"failed")
+            files.append({"name":item["name"],"file_id":item.get("file_id"),"step":stage,"reason":item.get("reason"),"order_id":item.get("order_id"),"t0":None,"t1":None if stage == "queued" else 1,"order_doc":item["status"] != "classified"})
+        P = {"name":batch["name"],"started":_t.time(),"files":files}
     fs = P["files"]; fin = [f for f in fs if f["t1"]]
     timed = [f["t1"] - f["t0"] for f in fin if f["t0"] is not None and f["step"] in ("saved", "failed") and f["t1"] - f["t0"] > 5]
     avg = sum(timed[-8:]) / len(timed[-8:]) if timed else 150.0      # rolling avg seconds per order doc
@@ -255,10 +269,22 @@ def progress(bid):
     cur = next((f for f in fs if f["step"] == "reading"), None)
     eta = remaining_docs * avg - (min(_t.time() - cur["t0"], avg * 0.9) if cur and cur["t0"] else 0)
     docs = [f for f in fs if f["order_doc"]]
+    jobs = db.file_job_progress([f["file_id"] for f in fs if f.get("file_id")])
+    output_files = []
+    for f in fs:
+        reads = jobs.get(f.get("file_id"), {"total":0,"done":0,"failed":0,"jobs":[]})
+        active = [j for j in reads["jobs"] if j["status"] == "leased"]
+        if f["step"] == "saved": stage = "saved"
+        elif f["step"] in ("failed","skipped","classified"): stage = f["step"]
+        elif active: stage = active[-1].get("stage") or "received"
+        elif reads["total"] and reads["done"] + reads["failed"] == reads["total"]: stage = "validating"
+        elif reads["total"]: stage = "queued"
+        else: stage = "preparing" if f["step"] == "reading" else "queued"
+        output_files.append({**{k:f[k] for k in ("name","step","reason","order_id")}, "worker_stage":stage,"reads":reads})
     return {"batch_id": bid, "name": P.get("name"), "total": len(fs), "finished": len(fin),
             "order_docs": len(docs), "order_docs_done": sum(1 for f in docs if f["t1"]),
             "avg_s_per_doc": round(avg), "eta_s": max(0, round(eta)) if remaining_docs else 0,
-            "active": len(fin) < len(fs), "files": [{k: f[k] for k in ("name", "step", "reason", "order_id")} for f in fs]}
+            "active": len(fin) < len(fs) or bool(persisted and persisted["status"] == "processing"), "phase":"waiting" if not fs and persisted and persisted["status"] == "processing" else "processing", "batch_status":persisted["status"] if persisted else None, "files": output_files, "reads_done":sum(x["reads"]["done"] for x in output_files), "reads_total":sum(x["reads"]["total"] for x in output_files)}
 
 def _process_upload(path: Path, name: str, size: int, sha: str, force_ai=False) -> dict:
     bid = getattr(_tl, "bid", None)
@@ -318,25 +344,35 @@ def _bg_batch(bid, tmp, name, size, sha, force_ai, owner=None):
         tmp.unlink(missing_ok=True)
         import time as _t
         for f in PROG.get(bid, {}).get("files", []):
-            if not f["t1"]: f.update(step="skipped", reason=f["reason"] or "not processed", t1=_t.time())
+            if not f["t1"] and f["step"] != "queued": f.update(step="failed", reason=f["reason"] or "processing interrupted", t1=_t.time())
+
+def _recover_batches():
+    for b in db.interrupted_batches():
+        p = Path(b["input_path"]) if b.get("input_path") else None
+        if p is None or not p.is_file():
+            db.save_batch(b["id"], "failed", b["name"], {"error": "Retained upload missing; please upload again"})
+            continue
+        threading.Thread(target=_bg_batch, args=(b["id"], p, b["name"], b["input_size"], b["input_sha"], bool(b["force_ai"]), b["owner"]), daemon=True).start()
 
 async def _run_upload(file: UploadFile, force_ai: bool, wait: bool = True, owner=None):
-    if not wait:
-        name = _safe_name(file.filename)
-        tmp, size, sha = await _stream_to_disk(file)
-        bid = _sec.token_hex(8); db.save_batch(bid, "processing", name)
-        threading.Thread(target=_bg_batch, args=(bid, tmp, name, size, sha, force_ai, owner), daemon=True).start()
-        return {"batch_id": bid, "status": "processing"}
     name = _safe_name(file.filename)
     tmp, size, sha = await _stream_to_disk(file)
-    try:
-        try:
-            res = await asyncio.wait_for(run_in_threadpool(process_upload, tmp, name, size, sha, force_ai, owner), config.EXTRACT_TIMEOUT_S)
-        except asyncio.TimeoutError:
-            raise HTTPException(504, f"Extraction exceeded {config.EXTRACT_TIMEOUT_S}s")
-    finally:
-        tmp.unlink(missing_ok=True)
-    return res
+    bid = _sec.token_hex(8)
+    retained = config.DATA_DIR / "uploads"; retained.mkdir(exist_ok=True)
+    target = retained / (bid + tmp.suffix)
+    tmp.replace(target); tmp = target
+    db.save_batch(bid, "processing", name, input_path=tmp, input_size=size, input_sha=sha, force_ai=force_ai, owner=owner)
+    threading.Thread(target=_bg_batch, args=(bid, tmp, name, size, sha, force_ai, owner), daemon=True).start()
+    if not wait:
+        return {"batch_id": bid, "status": "processing"}
+    import time
+    deadline = time.monotonic() + config.EXTRACT_TIMEOUT_S
+    while time.monotonic() < deadline:
+        batch = db.get_batch(bid)
+        if batch["status"] == "done": return batch["result"]
+        if batch["status"] == "failed": raise HTTPException(500, {"batch_id":bid, "error":batch["result"].get("error")})
+        await asyncio.sleep(.1)
+    raise HTTPException(504, {"batch_id":bid, "status":"processing", "detail":"Extraction still processing; upload retained. Poll the batch for its outcome."})
 
 @app.post("/api/upload")
 async def upload(request: Request, file: UploadFile = File(...), wait: int = 1):
@@ -354,15 +390,35 @@ def api_batch(bid: str, view: str = "upload"):
         b["result"] = {"summary": b["result"]["summary"], "results": [api_view(i) for i in b["result"]["items"]]}
     return b
 
+@app.get("/api/batches/{bid}/events")
+async def batch_events(request: Request, bid: str):
+    if not db.get_batch(bid): raise HTTPException(404)
+    async def stream():
+        last = None
+        while not await request.is_disconnected():
+            batch = db.get_batch(bid)
+            snapshot = progress(bid) or {"batch_id":bid,"active":batch["status"] == "processing","files":[]}
+            snapshot["batch_status"] = batch["status"]
+            serialized = json.dumps(snapshot, separators=(",", ":"))
+            if serialized != last:
+                yield "event: progress\ndata: " + serialized + "\n\n"
+                last = serialized
+            else: yield ": heartbeat\n\n"
+            if batch["status"] != "processing" and not snapshot["active"]:
+                yield "event: complete\ndata: " + serialized + "\n\n"; return
+            await asyncio.sleep(1)
+    return StreamingResponse(stream(),media_type="text/event-stream",headers={"Cache-Control":"no-cache", "X-Accel-Buffering":"no"})
+
 # ---- AI worker pull API (box polls Render over HTTPS) ----
 import base64 as _b64
 
 @app.get("/api/worker/pending")
-def worker_pending(owner: str = ""):
+def worker_pending(owner: str = "", worker: str = "tick"):
     """Cheap check for the box cron tick. Only counts jobs uploaded by the configured app account."""
     acct = os.getenv("APP_USERNAME", "")
     if owner != acct:
         return {"pending": 0, "owner": owner, "note": "only jobs of the app account are served"}
+    db.heartbeat(worker, "polling")
     return {"pending": db.pending_jobs(acct)}
 
 @app.get("/api/worker/next")
@@ -370,10 +426,10 @@ def worker_next(worker: str = "box", owner: str = ""):
     db.heartbeat(worker)
     acct = os.getenv("APP_USERNAME", "")
     if owner != acct:
-        return JSONResponse(None, 204)
+        return Response(status_code=204)
     j = db.claim_job(worker, acct)
     if not j:
-        return JSONResponse(None, 204)
+        return Response(status_code=204)
     if j.get("image") is not None:
         j["image_b64"] = _b64.b64encode(j.pop("image")).decode()
     else:
@@ -383,12 +439,21 @@ def worker_next(worker: str = "box", owner: str = ""):
 @app.post("/api/worker/result")
 async def worker_result(req: Request):
     b = await req.json()
-    if not isinstance(b.get("id"), int) or not isinstance(b.get("lease_id"), str):
+    if not isinstance(b, dict) or type(b.get("id")) is not int or not isinstance(b.get("lease_id"), str):
         raise HTTPException(400, "id and lease_id required")
     if b.get("error") is None and not isinstance(b.get("text"), str):
         raise HTTPException(400, "text or error required")
+    if b.get("error") is not None and not isinstance(b["error"], str):
+        raise HTTPException(400, "error must be text")
     st = db.finish_job(b["id"], b["lease_id"], result=b.get("text"), error=b.get("error"))
     return {"ack": st}
+
+@app.post("/api/worker/progress")
+async def worker_progress(req: Request):
+    body = await req.json()
+    if not isinstance(body,dict) or type(body.get("id")) is not int or not isinstance(body.get("lease_id"),str) or not isinstance(body.get("stage"),str):
+        raise HTTPException(400,"id, lease_id and stage required")
+    return {"ok":db.update_job_progress(body["id"],body["lease_id"],body["stage"])}
 
 @app.post("/api/worker/renew")
 async def worker_renew(req: Request):
@@ -404,7 +469,7 @@ def worker_status_api():
     return db.worker_status()
 
 def ai_info():
-    return {"model_a": os.getenv("OPENCODE_MODEL", "opencode/big-pickle"), "model_b": os.getenv("OPENCODE_MODEL_B", "opencode/nemotron-3-ultra-free"),
+    return {"model_a": os.getenv("OPENCODE_MODEL", "opencode/big-pickle"), "model_b": os.getenv("OPENCODE_MODEL_B", "opencode/mimo-v2.6-flash-free"),
             "model_image": os.getenv("OPENCODE_VISION_MODEL", "opencode/mimo-v2.6-flash-free"),
             "queued_files": len(db.queued_files()), "cached": db.cached_count()}
 
@@ -423,14 +488,40 @@ def _retry_loop():
             for f in db.queued_files():
                 qp = next((config.DATA_DIR / "queue").glob(f"{f['id']}.*"), None) or (config.DATA_DIR / "queue" / str(f["id"]))
                 if not qp.exists():
-                    db.update_file(f["id"], status="failed", reason="queued copy lost (instance restarted)"); continue
+                    reason = "queued copy lost (instance restarted)"
+                    db.update_file(f["id"], status="failed", reason=reason)
+                    _record_retry(f["id"], {"file_id":f["id"],"name":f["name"],"status":"failed","reason":reason,"category":_cat_from_name(f["name"])})
+                    continue
                 with EXTRACT_LOCK:
-                    r = process_one(qp, f["name"])
+                    r = process_one(qp, f["name"], on_file=lambda new: _bind_retry(f["id"], new))
+                _record_retry(f["id"], r)
                 db.update_file(f["id"], status="retried", reason=f"re-processed as file {r['file_id']}: {r['status']}")
-                if r["status"] != "queued_ai":
-                    qp.unlink(missing_ok=True)
+                qp.unlink(missing_ok=True)
         except Exception:
             logging.exception("retry loop")
+
+def _bind_retry(fid, new_fid):
+    for b in db.batches_with_results():
+        payload = json.loads(b["result"])
+        matching = [i for i in payload.get("items",[]) if i.get("file_id") == fid or i.get("retry_from") == fid]
+        if not matching: continue
+        for item in matching: item.update(file_id=new_fid, retry_from=fid, status="processing", reason=None)
+        payload["summary"] = summarize(payload["items"], b["name"], "zip_id" in payload)
+        db.save_batch(b["id"], "done", b["name"], payload)
+        for f in PROG.get(b["id"],{}).get("files",[]):
+            if f.get("file_id") == fid: f.update(file_id=new_fid,step="reading",t0=__import__("time").time(),t1=None,reason=None)
+
+def _record_retry(fid, result):
+    for b in db.batches_with_results():
+        payload = json.loads(b["result"])
+        if not any((i.get("file_id") == fid or i.get("retry_from") == fid) for i in payload.get("items", [])): continue
+        payload["items"] = [result if i.get("file_id") == fid or i.get("retry_from") == fid else i for i in payload["items"]]
+        payload["summary"] = summarize(payload["items"], b["name"], "zip_id" in payload)
+        db.save_batch(b["id"], "done", b["name"], payload)
+        if b["id"] in PROG:
+            for f in PROG[b["id"]]["files"]:
+                if f["name"] == result["name"] and f["step"] in ("queued","reading"):
+                    f.update(file_id=result["file_id"],step={"done":"saved", "classified":"classified", "skipped":"skipped", "queued_ai":"queued"}.get(result["status"], "failed"), reason=result.get("reason"), order_id=result.get("order_id"), t1=None if result["status"] == "queued_ai" else __import__("time").time())
 
 def api_view(item: dict) -> dict:
     """API-style structured response for one processed file."""
@@ -439,10 +530,13 @@ def api_view(item: dict) -> dict:
            "reason": item.get("reason"), "attempts": item.get("attempts")}
     if item.get("order_id"):
         o = db.get_order(item["order_id"])
+        if not o:
+            out.update(status="order_deleted", reason="The previously extracted order was deleted")
+            return out
         out["order"] = {k: o[k] for k in ("id", "buyer_name", "brand", "style_number", "factory", "planned_line", "fob", "smv", "cm", "department", "sizes", "colors", "currency")}
         out["pos"] = [{k: p[k] for k in ("po_number", "po_date", "ship_date", "destination", "sales_contract_number", "stated_total_qty", "stated_total_value", "currency")} for p in o["pos"]]
         out["lines"] = [{"po_number": p["po_number"], **{k: l[k] for k in ("style", "color", "color_code", "sizes", "order_qty", "rate", "net_value")}} for p in o["pos"] for l in p["lines"]]
-        tq = sum(sum(l["sizes"].values()) for l in out["lines"]); tv = round(sum(l["net_value"] or 0 for l in out["lines"]), 2)
+        tq = sum(sum(l["sizes"].values()) if l["sizes"] else (l["order_qty"] or 0) for l in out["lines"]); tv = round(sum(l["net_value"] or 0 for l in out["lines"]), 2)
         out["totals"] = {"qty": tq, "value": tv, "stated_qty": sum(p["stated_total_qty"] or 0 for p in o["pos"]),
                          "stated_value": round(sum(p["stated_total_value"] or 0 for p in o["pos"]), 2), "currency": o["currency"]}
         rv = o.get("review") or {}
@@ -491,6 +585,7 @@ def api_delete(oid: int):
 def api_order(oid: int):
     o = db.get_order(oid)
     if not o: raise HTTPException(404)
+    o["extraction_status"] = o.get("review_status") or ("unverified" if o.get("method") else None)
     return o
 
 @app.put("/api/orders/{oid}")
@@ -533,7 +628,7 @@ EMPTY = {"id": None, "buyer_name": None, "brand": None, "style_number": None, "f
 
 @app.get("/orders/new", response_class=HTMLResponse)
 def order_new(request: Request):
-    return tpl.TemplateResponse(request, "order.html", {"o": EMPTY, "hl": {}, "active": "book"})
+    return tpl.TemplateResponse(request, "order.html", {"o": EMPTY, "hl": {}, "active": "book", "options": db.order_options()})
 
 def _highlights(o):
     """Fields where the second AI read differed: {field_key: other_value}, shown as a subtle hint in the form."""
@@ -552,5 +647,6 @@ def order_page(request: Request, oid: int):
     o = db.get_order(oid)
     if not o: raise HTTPException(404)
     hl = _highlights(o)
+    o["extraction_status"] = o.get("review_status") or ("unverified" if o.get("method") else None)
     o = {k: v for k, v in o.items() if k not in ("review", "review_status")}   # page only needs the form data + highlights
-    return tpl.TemplateResponse(request, "order.html", {"o": o, "hl": hl, "active": "book"})
+    return tpl.TemplateResponse(request, "order.html", {"o": o, "hl": hl, "active": "book", "options": db.order_options()})

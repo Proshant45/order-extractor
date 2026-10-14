@@ -11,3 +11,9 @@ bin/opencode
 worker/.env
 worker/worker.log
 worker/tick.log*
+.pytest_cache/
+worker/worker.log*
+worker/outbox/
+worker/.tick.lock
+
+.playwright-mcp/

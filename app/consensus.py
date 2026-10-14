@@ -34,22 +34,30 @@ PO_STR = ("destination", "sales_contract_number")
 def flatten(d: dict) -> dict[str, object]:
     """Normalised field map: keys are stable paths, values comparable."""
     f = {k: _s(d.get(k)) or None for k in HEADER}
+    f.update({k: _n(d.get(k)) for k in ("fob", "smv", "cm")})
+    po_counts = {}
     for p in d.get("pos") or []:
         pn = _s(p.get("po_number"))
-        b = f"PO[{pn}]"
+        po_counts[pn] = po_counts.get(pn, 0) + 1
+        b = f"PO[{pn}]" + (f".part[{po_counts[pn]}]" if po_counts[pn] > 1 else "")
         f[f"{b}.exists"] = True
         f[f"{b}.po_date"] = _date(p.get("po_date")); f[f"{b}.ship_date"] = _date(p.get("ship_date"))
         for k in PO_STR:
             f[f"{b}.{k}"] = _s(p.get(k)) or None
         f[f"{b}.stated_total_qty"] = _n(p.get("stated_total_qty")); f[f"{b}.stated_total_value"] = _n(p.get("stated_total_value"))
+        occurrences = {}
         for l in p.get("lines") or []:
-            c = _s(l.get("color")); lb = f"{b}.line[{c}|{_n(l.get('rate'))}]"
+            c = _s(l.get("color")); identity = (c, _s(l.get("style")), _s(l.get("color_code")), _n(l.get("rate")))
+            occurrences[identity] = occurrences.get(identity, 0) + 1
+            lb = f"{b}.line[{c}|{identity[1]}|{identity[2]}|{identity[3]}|{occurrences[identity]}]"
             f[f"{lb}.style"] = _s(l.get("style")) or None
             for k in ("order_qty", "rate", "net_value"):
                 f[f"{lb}.{k}"] = _n(l.get(k))
             from .schema import norm_size
             for sz, q in (l.get("sizes") or {}).items():
-                f[f"{lb}.size[{norm_size(sz)}]"] = _n(q)
+                key = f"{lb}.size[{norm_size(sz)}]"
+                value = _n(q)
+                f[key] = (f.get(key) or 0) + value if isinstance(value, (int, float)) else value
     return f
 
 def compare(a: dict, b: dict, det: dict | None = None) -> list[dict]:
@@ -74,12 +82,14 @@ def models(image: bool) -> tuple[str | None, str | None]:
     if image:   # only mimo reads images among the free Zen models (tested); B = same model, different framing
         v = os.getenv("OPENCODE_VISION_MODEL", "opencode/mimo-v2.6-flash-free")
         return v, os.getenv("OPENCODE_VISION_MODEL_B", v)
-    return os.getenv("OPENCODE_MODEL", "opencode/big-pickle"), os.getenv("OPENCODE_MODEL_B", "opencode/nemotron-3-ultra-free")
+    return os.getenv("OPENCODE_MODEL", "opencode/big-pickle"), os.getenv("OPENCODE_MODEL_B", "opencode/mimo-v2.6-flash-free")
 
 def dual_read(*, text: str | None = None, image_png: bytes | None = None, det: dict | None, log) -> dict:
     ma, mb = models(image_png is not None)
     owner = getattr(llm.CURRENT, "owner", None)
+    file_id, page = getattr(llm.CURRENT,"file_id",None), getattr(llm.CURRENT,"page",None)
     def vote(model, variant, tag):
+        llm.CURRENT.file_id = file_id; llm.CURRENT.page = page; llm.CURRENT.vote = tag
         llm.CURRENT.owner = owner   # thread-local does not cross into the pool threads
         cands = [model] + [m for m in os.getenv("OPENCODE_FALLBACK_MODELS", "opencode/step-5-preview-free,opencode/big-pickle").split(",")
                            if m and m != model] if (os.getenv("EXTRACTOR", "").lower() == "opencode" or os.getenv("AI_QUEUE") == "1") and image_png is None else [model]

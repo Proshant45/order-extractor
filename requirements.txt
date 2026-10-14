@@ -12,3 +12,5 @@ httpx
 xlrd
 bcrypt
 itsdangerous
+
+python-dotenv

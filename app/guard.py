@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json, re
 from . import llm, parsers
+from .schema import Order, to_qty
 
 def _norm(s):
     return re.sub(r"[^A-Z0-9]", "", str(s or "").upper())
@@ -12,7 +13,7 @@ def arithmetic_errors(d: dict) -> list[str]:
         tq, tv = 0, 0.0
         for l in p.get("lines") or []:
             try:
-                s = sum(int(float(str(v).replace(",", ""))) for v in (l.get("sizes") or {}).values())
+                s = sum(to_qty(v) or 0 for v in (l.get("sizes") or {}).values()) if l.get("sizes") else (to_qty(l.get("order_qty")) or 0)
             except ValueError:
                 e.append(f"{l.get('color')}: non-numeric size qty"); continue
             tq += s
@@ -38,10 +39,21 @@ def text_errors(d: dict, text: str | None) -> list[str]:
     T = text.replace(",", "")
     nt = _norm(text)
     e = []
+    def number_present(value):
+        try:
+            target = float(str(value).replace(",", ""))
+        except (ValueError, TypeError):
+            return False
+        return any(float(m.group()) == target for m in re.finditer(r"(?<![\d.])\d+(?:\.\d+)?(?![\d.])", T))
     for p in d.get("pos") or []:
+        for key in ("stated_total_qty", "stated_total_value"):
+            if p.get(key) is not None and not number_present(p[key]):
+                e.append(f"PO {p.get('po_number')} {key} {p[key]} not in document text")
         if p.get("po_number") and _norm(p["po_number"]) not in nt:
             e.append(f"po_number {p['po_number']} not in document text")
         for l in p.get("lines") or []:
+            if not l.get("sizes") and l.get("order_qty") is not None and not number_present(l["order_qty"]):
+                e.append(f"{l.get('color')} order_qty {l['order_qty']} not in document text")
             if l.get("color") and _norm(l["color"]) not in nt:
                 e.append(f"color {l['color']!r} not in document text")
             for sz, q in (l.get("sizes") or {}).items():
@@ -86,7 +98,11 @@ def ai_extract_with_guard(read, text: str | None, log, max_repairs: int = 2, det
         except Exception as ex:
             log(f"AI attempt {attempt} failed: {ex}", "warn"); errs = [f"AI call failed: {ex}"]; d = None
         else:
-            errs = arithmetic_errors(d) + text_errors(d, text) + (compare_to_deterministic(d, det) if det else [])
+            try:
+                Order.model_validate(d)
+                errs = arithmetic_errors(d) + text_errors(d, text) + (compare_to_deterministic(d, det) if det else [])
+            except (ValueError, TypeError, AttributeError) as ex:
+                errs = [f"invalid structured output: {ex}"]; d = None
         log(f"AI attempt {attempt}: {len(errs)} guard error(s)" + (": " + "; ".join(errs[:8]) if errs else ""), "warn" if errs else "info")
         if d is not None and (best_err is None or len(errs) < len(best_err)):
             best, best_err = d, errs

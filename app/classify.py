@@ -20,7 +20,7 @@ W_NAME, W_TEXT = 3, 1
 
 def classify(name: str, text: str | None) -> tuple[str, dict]:
     nm = Path(name).name.replace("_", " ")
-    head = (text or "")[:15000]
+    head = (text or "")[:200000]
     scores = {}
     for t, pats in RULES.items():
         s = 0

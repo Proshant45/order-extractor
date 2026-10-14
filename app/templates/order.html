@@ -1,18 +1,35 @@
-{% extends "base.html" %}{% block body %}
-<header class="top"><div><h1>{{ "Order #" ~ o.id if o.id else "New Order" }}</h1><div class="crumb">Dashboard &gt; <a href="/">Order Book</a> &gt; {{ "Edit Order" if o.id else "Add Order" }} &gt; <b>{{ "Order #" ~ o.id if o.id else "New Order" }}</b></div></div>
-<div>{% if o.id %}<button class="btn ghost" onclick="del()">🗑 Delete</button> {% endif %}<button class="btn ghost" onclick="save('draft')">💾 Save as Draft</button> <button class="btn dark" onclick="save('saved')">{{ "Save" if o.id else "Add Now" }}</button></div></header>
-<div id="warn" class="warnbox"></div>
-
-<section class="card"><div class="row hdr">
-<label>Buyer Name *<input id="buyer_name"></label><label>Brand *<input id="brand" placeholder="Select a brand"></label>
-<label>Style Number *<input id="style_number"></label><label>Factory *<input id="factory"></label>
-<label>Planned Line *<input id="planned_line" type="number" min="1"></label><label>FOB *<input id="fob" placeholder="Enter FOB"></label>
-<label>SMV<input id="smv" placeholder="Enter SMV"></label><label>CM<input id="cm" placeholder="Enter CM"></label>
-<label>Style Image *<div class="upl">⤒ Upload style image<small>Accepted file type: JPEG, PNG</small></div></label></div></section>
-<section class="card"><div class="row three"><label>Department *<input id="department"></label><label>Size *<input id="sizes" title="comma separated"></label>
-<label>Color *<input id="colors" title="comma separated"></label><div class="acts"><button class="btn dark" onclick="addPO()">Add PO Breakdown ＋</button>
-{% if o.method %}<span class="btn blue">Auto Extract ✓</span>{% endif %}</div></div>
-<p class="muted">Source: {{o.file_name or 'manual'}}</p></section>
+{% extends "base.html" %}
+{% block title %}{{ "Order #" ~ o.id if o.id else "New Order" }} · Texora 360{% endblock %}
+{% block body_class %}order-page{% endblock %}
+{% block body %}
+<header class="top">
+  <div><div class="title-line"><h1 id="order-title">{{ "Order #" ~ o.id if o.id else "New Order" }}</h1><div class="order-state"><span id="save-state" class="pill" role="status"></span><span id="extraction-state" role="status"></span></div></div>
+    <div class="crumb">Dashboard &gt; <a href="/">Order Book</a> &gt; {{ "Edit Order" if o.id else "Add Order" }} &gt; <b id="crumb-title">{{ "Order #" ~ o.id if o.id else "New Order" }}</b></div>
+  </div>
+  <div class="header-actions">{% if o.id %}<button class="btn ghost" onclick="del()">Delete</button>{% endif %}<button class="btn ghost save-button" onclick="save('draft')">▣ &nbsp; Save as Draft</button><button class="btn dark save-button primary-save" onclick="save('saved')">{{ "Save" if o.id else "Add Now" }}</button></div>
+</header>
+<div id="warn" class="warnbox" role="status" aria-live="polite"></div>
+<section class="card order-header" aria-label="Order details"><div class="row hdr">
+  <label>Buyer Name <span class="required">*</span><select id="buyer_name" data-placeholder="Select a buyer name" aria-label="Buyer Name"></select></label>
+  <label>Brand <span class="required">*</span><select id="brand" data-placeholder="Select a brand" aria-label="Brand"></select></label>
+  <label>Style Number <span class="required">*</span><input id="style_number" placeholder="Enter a style number"></label>
+  <label>Factory <span class="required">*</span><select id="factory" data-placeholder="Select factory" aria-label="Factory"></select></label>
+  <label>Planned Line <span class="required">*</span><input id="planned_line" type="number" min="1" step="1" placeholder="1"></label>
+  <label>FOB <span class="required">*</span><span class="money-field"><input id="fob" type="number" min="0" step="any" placeholder="Enter FOB"><select id="currency" aria-label="FOB currency" data-placeholder="CCY"></select></span></label>
+  <label>SMV <span class="required">*</span><input id="smv" type="number" min="0" step="any" placeholder="Enter SMV"></label>
+  <label>CM <span class="required">*</span><span class="money-field"><input id="cm" type="number" min="0" step="any" placeholder="Enter CM"><select id="cm-currency" aria-label="CM currency" data-placeholder="CCY"></select></span></label>
+  <div class="style-field"><label for="style-image">Style Image <span class="required">*</span></label><div class="style-image-control"><label class="upl file-button" for="style-image"><span>↥ &nbsp; Upload style image</span><small>Accepted file type: JPEG, PNG</small><input id="style-image" type="file" accept="image/jpeg,image/png"></label><div id="style-preview-wrap" hidden><img id="style-preview" alt="Style image preview"><button id="remove-image" class="remove-image" type="button" aria-label="Remove style image">×</button></div></div></div>
+</div></section>
+<section class="card breakdown-controls" aria-label="PO breakdown controls"><div class="row three">
+  <label>Department <span class="required">*</span><select id="department" data-placeholder="Select a department" aria-label="Department"></select></label>
+  <label>Size <span class="required">*</span><select id="sizes" data-placeholder="Select size" aria-label="Size" title="Select a size range. Hidden quantities are retained."></select></label>
+  <label>Color <span class="required">*</span><span class="color-field"><input id="colors" placeholder="Enter color name" title="Color names separated by commas"><button id="see-color" type="button">▤ SEE COLOR</button></span></label>
+  <div class="acts"><button class="btn dark" onclick="addPO()">Add PO Breakdown ＋</button><label class="btn blue file-button extract-button"><span>Auto Extract &nbsp; ♧</span><input id="auto-extract" type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.xlsx,.xls,.csv,.docx,.zip" aria-label="Auto Extract from a document"></label></div>
+</div><div class="source-note muted">Source: {{ o.file_name or 'manual' }}<span id="hidden-size-note"></span></div>
+<div id="extract-result" role="status" aria-live="polite"></div></section>
 <div id="pos"></div>
-<div class="foot"><button class="btn ghost" onclick="save('draft')">💾 Save as Draft</button> <button class="btn dark" onclick="save('saved')">Add Now</button></div>
-<script>const O={{ o|tojson }};const HL={{ hl|tojson }};</script><script src="/static/order.js"></script>{% endblock %}
+<div class="foot"><button class="btn ghost save-button" onclick="save('draft')">▣ &nbsp; Save as Draft</button><button class="btn dark save-button primary-save" onclick="save('saved')">{{ "Save" if o.id else "Add Now" }}</button></div>
+<dialog id="choice-dialog" class="choice-dialog"><form id="choice-form"><h3 id="choice-title">Add option</h3><label id="choice-label" for="choice-value">Value</label><input id="choice-value" autocomplete="off" required><p id="choice-hint" class="muted"></p><div class="dialog-actions"><button type="button" class="btn ghost" onclick="document.getElementById('choice-dialog').close()">Cancel</button><button class="btn blue" type="submit">Add &amp; select</button></div></form></dialog>
+<dialog id="color-dialog" class="choice-dialog"><form id="color-form"><h3>Order colors</h3><div id="color-choices"></div><label for="new-color">Add a color name</label><input id="new-color" placeholder="Enter color name"><div class="dialog-actions"><button type="button" class="btn ghost" onclick="document.getElementById('color-dialog').close()">Cancel</button><button class="btn blue" type="submit">Apply colors</button></div></form></dialog>
+<script>const OPTIONS={{ options|default({})|tojson }};const O={{ o|tojson }};const HL={{ hl|tojson }};</script><script src="/static/order.js"></script>
+{% endblock %}

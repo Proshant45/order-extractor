@@ -132,7 +132,20 @@ def _as_text(path: Path, kind: str) -> str | None:
     if kind == "csv":
         return path.read_text(errors="replace")[:200000]
     if kind == "xlsx":
-        return "\n".join("\t".join("" if c is None else str(c) for c in r) for _, r in zip(range(5000), parsers.iter_xlsx(path)))
+        import openpyxl
+        rows = []
+        with_rows = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        try:
+            for sheet in with_rows.worksheets:
+                rows.append(f"=== SHEET: {sheet.title} ===")
+                for i, row in enumerate(sheet.iter_rows(values_only=True)):
+                    if i >= 20000:
+                        raise Skip(f"worksheet {sheet.title} exceeds 20000 rows; no partial order saved")
+                    if any(c is not None for c in row):
+                        rows.append("\t".join("" if c is None else str(c) for c in row).rstrip("\t"))
+            return "\n".join(rows)
+        finally:
+            with_rows.close()
     if kind == "docx":
         import docx
         d = docx.Document(str(path))
@@ -183,6 +196,19 @@ def _po_groups(texts: list[str]) -> list[tuple[int, int, int]]:
     cuts = starts[::per] + [len(texts)]
     return [(cuts[k], cuts[k + 1], len([v for v in first.values() if cuts[k] <= v < cuts[k + 1]]) or per) for k in range(len(cuts) - 1)]
 
+def _bounded_groups(texts, groups):
+    out = []
+    for lo, hi, count in groups:
+        start, length = lo, 0
+        for page in range(lo, hi):
+            n = len(texts[page])
+            if n > 60000: raise Skip(f"PDF page {page + 1} exceeds 60000 text characters; no partial order saved")
+            if page > start and length + 2 + n > 60000:
+                out.append((start, page, count)); start, length = page, 0
+            length += n + (2 if page > start else 0)
+        out.append((start, hi, count))
+    return out
+
 def _pdf_units(path: Path, log, ctx):
     import pdfplumber, pymupdf
     try:
@@ -191,6 +217,8 @@ def _pdf_units(path: Path, log, ctx):
         raise Skip(f"corrupt PDF: {e.__class__.__name__}")
     texts = []
     with pdf:
+        if len(pdf.pages) > config.MAX_PAGES:
+            raise Skip(f"PDF has {len(pdf.pages)} pages, limit is {config.MAX_PAGES}; no partial order saved")
         for page in pdf.pages[:config.MAX_PAGES]:
             texts.append(page.extract_text(layout=True) or ""); page.flush_cache()
     scanned = [i for i, t in enumerate(texts) if len(t.strip()) < 30]
@@ -199,11 +227,11 @@ def _pdf_units(path: Path, log, ctx):
     if not scanned:   # whole document in one read; split only multi-PO docs, on PO boundaries
         full = "\n\f".join(texts)
         det = parsers.parse_sap_po(full) if parsers.looks_like_sap_po(full) else None
-        groups = _po_groups(texts)
+        groups = _bounded_groups(texts, _po_groups(texts))
         if len(groups) <= 1:
             yield {"text": full, "page": "1-%d" % len(texts), "det": det}
             return
-        log(f"{sum(g[2] for g in groups)} PO headers; reading in {len(groups)} PO-boundary groups")
+        log(f"{sum(g[2] for g in groups)} PO headers; reading in {len(groups)} bounded page groups")
         for a0, a1, _ in groups:
             yield {"text": "\n\f".join(texts[a0:a1]), "page": "%d-%d" % (a0 + 1, a1), "det": None}
         return
@@ -241,8 +269,10 @@ def extract_ai_primary(path: Path, kind: str, log, ctx) -> tuple[dict, str]:
         units = [{"text": txt, "page": "1", "det": det}]
     A, B, dis, arith, gerr, status, used_det = [], [], [], [], [], "accepted", False
     owner = getattr(llm.CURRENT, "owner", None)
+    file_id = getattr(llm.CURRENT,"file_id",None)
     def _one(u):
         llm.CURRENT.owner = owner
+        llm.CURRENT.file_id = file_id; llm.CURRENT.page = u["page"]
         return consensus.dual_read(text=u.get("text"), image_png=u.get("image"), det=u["det"], log=log)
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=int(os.getenv("AI_PAGE_PARALLEL", "2"))) as ex:
@@ -259,7 +289,19 @@ def extract_ai_primary(path: Path, kind: str, log, ctx) -> tuple[dict, str]:
         if r["status"] != "accepted":
             status = "needs_review"
     a, b = llm.merge_pages(A), llm.merge_pages(B)
-    if not (a.get("pos") or []):
+    from . import guard
+    merged_errors = guard.arithmetic_errors(a) + guard.arithmetic_errors(b)
+    merged_conflicts = (a.get("_merge_conflicts") or []) + (b.get("_merge_conflicts") or [])
+    if merged_errors or merged_conflicts:
+        status = "needs_review"
+        arith += ["merged document: " + e for e in dict.fromkeys(merged_errors)]
+        gerr += ["merged document conflict: " + e for e in dict.fromkeys(merged_conflicts)]
+    # Only recognised layouts provide deterministic header fields; absent AI headers remain flagged.
+    for u in units:
+        if u.get("det"):
+            for key in ("style_number", "department"):
+                if u["det"].get(key): a[key] = u["det"][key]
+    if not (a.get("pos") or []) or any(not any(l.get("sizes") or l.get("order_qty") is not None for l in p.get("lines") or []) for p in a.get("pos") or []):
         status = "needs_review"; arith.append("no PO / quantity data extracted (never auto-accepted)")
     ctx["consensus"] = {"status": status, "disagreements": dis, "arithmetic_errors": arith, "guard_errors": gerr,
                         "models": ctx.get("models"), "version_a": a, "version_b": b,
@@ -278,7 +320,18 @@ def preview_text(path: Path, kind: str) -> str | None:
                     out.append(pg.extract_text() or ""); pg.flush_cache()
             return "\n".join(out)
         if kind == "xlsx":
-            return "\n".join("\t".join("" if c is None else str(c) for c in r) for _, r in zip(range(150), parsers.iter_xlsx(path)))
+            import openpyxl
+            wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+            try:
+                parts = []
+                for sheet in wb.worksheets:
+                    section = ["Sheet: " + sheet.title]
+                    for _, row in zip(range(150), sheet.iter_rows(values_only=True)):
+                        section.append("\t".join("" if c is None else str(c) for c in row).rstrip("\t"))
+                    parts.append("\n".join(section)[:2000])
+                return "\n".join(parts)
+            finally:
+                wb.close()
         return (_as_text(path, kind) or "")[:20000]
     except Exception:
         return None

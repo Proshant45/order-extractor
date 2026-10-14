@@ -42,9 +42,22 @@ def init():
     with conn() as c:
         c.executescript(SCHEMA)
         cols = {r[1] for r in c.execute("PRAGMA table_info(orders)")}
+        for name, declaration in (("style_image", "TEXT"),):
+            if name not in cols:
+                c.execute(f"ALTER TABLE orders ADD COLUMN {name} {declaration}")
+        pcols = {r[1] for r in c.execute("PRAGMA table_info(pos)")}
+        if "date_raw" not in pcols:
+            c.execute("ALTER TABLE pos ADD COLUMN date_raw TEXT")
+        bcols = {r[1] for r in c.execute("PRAGMA table_info(batches)")}
+        for name, declaration in (("input_path", "TEXT"), ("input_size", "INTEGER"), ("input_sha", "TEXT"), ("force_ai", "INTEGER DEFAULT 0"), ("owner", "TEXT")):
+            if name not in bcols:
+                c.execute(f"ALTER TABLE batches ADD COLUMN {name} {declaration}")
         jcols = {r[1] for r in c.execute("PRAGMA table_info(ai_jobs)")}
         if "owner" not in jcols:
             c.execute("ALTER TABLE ai_jobs ADD COLUMN owner TEXT")
+        for name, declaration in (("file_id", "INTEGER"), ("page", "TEXT"), ("vote", "TEXT"), ("stage", "TEXT"), ("received_at", "TEXT"), ("started_at", "TEXT"), ("output_at", "TEXT"), ("returned_at", "TEXT")):
+            if name not in jcols: c.execute(f"ALTER TABLE ai_jobs ADD COLUMN {name} {declaration}")
+        c.execute("CREATE INDEX IF NOT EXISTS ai_jobs_file ON ai_jobs(file_id,id)")
         fcols = {r[1] for r in c.execute("PRAGMA table_info(files)")}
         if "doc_type" not in fcols:
             c.execute("ALTER TABLE files ADD COLUMN doc_type TEXT")
@@ -81,13 +94,17 @@ def save_order(order, warnings, file_id=None, order_id=None, raw=None):
               (*vals, file_id, json.dumps(raw) if raw else None, now())).lastrowid
         else:
             c.execute("""UPDATE orders SET buyer_name=?,brand=?,style_number=?,factory=?,planned_line=?,fob=?,smv=?,cm=?,department=?,
-              sizes=?,colors=?,currency=?,warnings=?,updated_at=?,status='saved' WHERE id=?""", (*vals, order_id))
+              sizes=?,colors=?,currency=?,warnings=?,updated_at=?,status=? WHERE id=?""", (*vals, d["status"], order_id))
             c.execute("DELETE FROM pos WHERE order_id=?", (order_id,))
+            c.execute("UPDATE files SET status='edited', reason='order edited; upload again for fresh extraction' WHERE id=(SELECT file_id FROM orders WHERE id=?)", (order_id,))
+            c.execute("UPDATE orders SET review_status='unverified', review_json=NULL WHERE id=?", (order_id,))
+        c.execute("UPDATE orders SET status=?, style_image=? WHERE id=?", (d["status"], d["style_image"], order_id))
         for i, p in enumerate(d["pos"]):
             pid = c.execute("""INSERT INTO pos(order_id,po_number,po_date,destination,ship_date,sales_contract_number,stated_total_qty,
               stated_total_value,currency,seq) VALUES(?,?,?,?,?,?,?,?,?,?)""",
               (order_id, p["po_number"], p["po_date"], p["destination"], p["ship_date"], p["sales_contract_number"],
                p["stated_total_qty"], p["stated_total_value"], p["currency"], i)).lastrowid
+            c.execute("UPDATE pos SET date_raw=? WHERE id=?", (json.dumps(p.get("date_raw") or {}), pid))
             for j, l in enumerate(p["lines"]):
                 c.execute("INSERT INTO po_lines(po_id,seq,style,color,color_code,sizes,order_qty,rate,net_value) VALUES(?,?,?,?,?,?,?,?,?)",
                           (pid, j, l["style"], l["color"], l["color_code"], json.dumps(l["sizes"]), l["order_qty"], l["rate"], l["net_value"]))
@@ -104,7 +121,7 @@ def get_order(oid):
         o["review"] = json.loads(o.get("review_json") or "null"); o.pop("review_json", None); o.pop("raw_json", None)
         o["pos"] = []
         for p in c.execute("SELECT * FROM pos WHERE order_id=? ORDER BY seq", (oid,)):
-            p = dict(p)
+            p = dict(p); p["date_raw"] = json.loads(p.get("date_raw") or "{}")
             p["lines"] = [dict(l, sizes=json.loads(l["sizes"])) for l in c.execute("SELECT * FROM po_lines WHERE po_id=? ORDER BY seq", (p["id"],))]
             o["pos"].append(p)
         return o
@@ -144,10 +161,10 @@ import secrets as _secrets, time as _time
 LEASE_S = int(os.getenv("AI_LEASE_S", "720"))  # long text docs can take >5 min on free models
 MAX_JOB_ATTEMPTS = 3
 
-def enqueue_job(prompt, model, text, image, owner=None):
+def enqueue_job(prompt, model, text, image, owner=None, *, file_id=None, page=None, vote=None):
     with conn() as c:
-        return c.execute("INSERT INTO ai_jobs(status,prompt,model,text,image,owner,created_at,updated_at) VALUES('queued',?,?,?,?,?,?,?)",
-                         (prompt, model, text, image, owner, now(), now())).lastrowid
+        return c.execute("INSERT INTO ai_jobs(status,prompt,model,text,image,owner,created_at,updated_at,file_id,page,vote,stage) VALUES('queued',?,?,?,?,?,?,?,?,?,?, 'queued')",
+                         (prompt, model, text, image, owner, now(), now(), file_id, page, vote)).lastrowid
 
 def pending_jobs(owner):
     """Cheap count for the box cron tick: queued jobs (or expired leases) belonging to the given app account."""
@@ -159,7 +176,7 @@ def cached_result(sha):
     """Most recent successful extraction of identical bytes."""
     with conn() as c:
         r = c.execute("SELECT f.id file_id, f.method, f.doc_type, f.meta, f.kind, f.status, o.id order_id, o.review_status FROM files f "
-                      "LEFT JOIN orders o ON o.file_id=f.id WHERE f.sha256=? AND f.status IN ('done','classified') ORDER BY f.id DESC LIMIT 1", (sha,)).fetchone()
+                      "LEFT JOIN orders o ON o.file_id=f.id WHERE f.sha256=? AND f.status IN ('done','classified') AND (o.id IS NOT NULL OR f.status='classified') ORDER BY f.id DESC LIMIT 1", (sha,)).fetchone()
         return dict(r) if r else None
 
 def get_job(jid):
@@ -178,37 +195,37 @@ def claim_job(worker, owner=None):
         c.execute("BEGIN IMMEDIATE")
         c.execute("UPDATE ai_jobs SET status=CASE WHEN attempts>=? THEN 'error' ELSE 'queued' END, error=CASE WHEN attempts>=? THEN 'lease expired too often' ELSE error END "
                   "WHERE status='leased' AND lease_until<?", (MAX_JOB_ATTEMPTS, MAX_JOB_ATTEMPTS, t))
-        r = c.execute("SELECT id,prompt,model,text,image FROM ai_jobs WHERE status='queued' AND (? IS NULL OR owner=?) ORDER BY id LIMIT 1",
+        r = c.execute("SELECT id,prompt,model,text,image,file_id,page,vote FROM ai_jobs WHERE status='queued' AND (? IS NULL OR owner=?) ORDER BY id LIMIT 1",
                       (owner, owner)).fetchone()
         if not r:
             return None
         lease = _secrets.token_hex(12)
-        c.execute("UPDATE ai_jobs SET status='leased', lease_id=?, lease_until=?, attempts=attempts+1, worker=?, updated_at=? WHERE id=?",
-                  (lease, t + LEASE_S, worker, now(), r["id"]))
+        c.execute("UPDATE ai_jobs SET status='leased', stage='received', received_at=?, started_at=NULL, output_at=NULL, returned_at=NULL, lease_id=?, lease_until=?, attempts=attempts+1, worker=?, updated_at=? WHERE id=?",
+                  (now(), lease, t + LEASE_S, worker, now(), r["id"]))
         return dict(r, lease_id=lease, lease_s=LEASE_S)
 
 def renew_job(jid, lease_id):
     """Extend a live lease (worker still running a long read). False if the lease is gone/stale."""
     with conn() as c:
-        n = c.execute("UPDATE ai_jobs SET lease_until=?, updated_at=? WHERE id=? AND lease_id=? AND status='leased'",
-                      (_time.time() + LEASE_S, now(), jid, lease_id)).rowcount
+        n = c.execute("UPDATE ai_jobs SET lease_until=?, updated_at=? WHERE id=? AND lease_id=? AND status='leased' AND lease_until>?",
+                      (_time.time() + LEASE_S, now(), jid, lease_id, _time.time())).rowcount
     return n == 1
 
 def finish_job(jid, lease_id, result=None, error=None):
     """Idempotent: a result for an already-finished job or a stale lease is acknowledged and ignored."""
     with conn() as c:
-        r = c.execute("SELECT status,lease_id,attempts FROM ai_jobs WHERE id=?", (jid,)).fetchone()
+        r = c.execute("SELECT status,lease_id,lease_until,attempts FROM ai_jobs WHERE id=?", (jid,)).fetchone()
         if not r:
             return "unknown"
         if r["status"] in ("done", "error", "cancelled"):
             return "already_" + r["status"]
-        if r["lease_id"] != lease_id:
+        if r["status"] != "leased" or r["lease_id"] != lease_id or (r["lease_until"] or 0) <= _time.time():
             return "stale_lease"
         if error is not None:
             st = "error" if r["attempts"] >= MAX_JOB_ATTEMPTS else "queued"   # retry on another poll
-            c.execute("UPDATE ai_jobs SET status=?, error=?, lease_id=NULL, updated_at=? WHERE id=?", (st, error[:1000], now(), jid))
+            c.execute("UPDATE ai_jobs SET status=?, stage=?, error=?, lease_id=NULL, updated_at=? WHERE id=?", (st, "queued" if st == "queued" else "failed", error[:1000], now(), jid))
             return "requeued" if st == "queued" else "error"
-        c.execute("UPDATE ai_jobs SET status='done', result=?, image=NULL, text=NULL, updated_at=? WHERE id=?", (result, now(), jid))
+        c.execute("UPDATE ai_jobs SET status='done', stage='returned', returned_at=?, result=?, error=NULL, image=NULL, text=NULL, updated_at=? WHERE id=?", (now(), result, now(), jid))
         return "ok"
 
 def heartbeat(worker, info=""):
@@ -227,10 +244,10 @@ def worker_status():
 def worker_online():
     return worker_status()["online"]
 
-def save_batch(bid, status, name, result=None):
+def save_batch(bid, status, name, result=None, *, input_path=None, input_size=None, input_sha=None, force_ai=False, owner=None):
     with conn() as c:
-        c.execute("INSERT INTO batches(id,status,name,result,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status, result=excluded.result, updated_at=excluded.updated_at",
-                  (bid, status, name, json.dumps(result) if result is not None else None, now(), now()))
+        c.execute("INSERT INTO batches(id,status,name,result,created_at,updated_at,input_path,input_size,input_sha,force_ai,owner) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status, result=excluded.result, updated_at=excluded.updated_at",
+                  (bid, status, name, json.dumps(result) if result is not None else None, now(), now(), str(input_path) if input_path else None, input_size, input_sha, int(force_ai), owner))
 
 def get_batch(bid):
     with conn() as c:
@@ -247,3 +264,62 @@ def queued_files():
 def cached_count():
     with conn() as c:
         return c.execute("SELECT COUNT(*) FROM files WHERE status='cached'").fetchone()[0]
+
+
+def interrupted_batches():
+    with conn() as c:
+        return [dict(r) for r in c.execute("SELECT * FROM batches WHERE status='processing' ORDER BY created_at")]
+
+
+def set_batch_input(bid, path, size, sha, force_ai, owner):
+    with conn() as c:
+        c.execute("UPDATE batches SET input_path=?, input_size=?, input_sha=?, force_ai=?, owner=? WHERE id=?",
+                  (str(path), size, sha, int(force_ai), owner, bid))
+
+
+def recover_extractions():
+    with conn() as c:
+        c.execute("UPDATE ai_jobs SET status='cancelled', error='server restarted; extraction replayed', updated_at=? WHERE status IN ('queued','leased')", (now(),))
+        c.execute("UPDATE files SET status='done', reason='recovered saved order after restart' WHERE status='processing' AND EXISTS(SELECT 1 FROM orders WHERE file_id=files.id)")
+        c.execute("UPDATE files SET status='failed', reason='server restarted during extraction; batch will retry retained input' WHERE status='processing'")
+
+
+def batches_with_results():
+    with conn() as c:
+        return [dict(r) for r in c.execute("SELECT id,name,result FROM batches WHERE status='done' AND result IS NOT NULL")]
+
+
+def update_job_progress(jid, lease_id, stage):
+    if stage not in {"starting", "model_started", "output_received", "returning"}: return False
+    with conn() as c:
+        column = {"model_started":"started_at", "output_received":"output_at"}.get(stage)
+        stamp = f", {column}=COALESCE({column},?)" if column else ""
+        values = (stage, now(), *((now(),) if column else ()), jid, lease_id, _time.time())
+        return c.execute(f"UPDATE ai_jobs SET stage=?, updated_at=?{stamp} WHERE id=? AND lease_id=? AND status='leased' AND lease_until>?", values).rowcount == 1
+
+
+def file_job_progress(file_ids):
+    if not file_ids: return {}
+    with conn() as c:
+        rows = [dict(r) for r in c.execute(f"SELECT id,file_id,page,vote,model,status,stage,worker,attempts,updated_at,error,received_at,started_at,output_at,returned_at FROM ai_jobs WHERE file_id IN ({','.join('?' for _ in file_ids)}) ORDER BY id", file_ids)]
+    out = {}
+    for r in rows:
+        x = out.setdefault(r["file_id"], {"total":0,"done":0,"failed":0,"jobs":[]})
+        x["total"] += 1; x["done"] += r["status"] == "done"; x["failed"] += r["status"] in ("error", "cancelled")
+        x["jobs"].append(r)
+    return out
+
+
+def order_options():
+    fields = ('buyer_name', 'brand', 'factory', 'department', 'currency')
+    options = {field: set() for field in (*fields, 'destination', 'colors', 'sizes')}
+    with conn() as c:
+        for row in c.execute('SELECT buyer_name,brand,factory,department,currency,sizes,colors FROM orders'):
+            for field in fields:
+                if row[field] and row[field].strip(): options[field].add(row[field].strip())
+            sizes = json.loads(row['sizes'] or '[]')
+            if sizes: options['sizes'].add(', '.join(sizes))
+            options['colors'].update(x for x in json.loads(row['colors'] or '[]') if x)
+        options['destination'].update(row[0] for row in c.execute("SELECT DISTINCT destination FROM pos WHERE destination IS NOT NULL AND destination<>''"))
+        options['colors'].update(row[0] for row in c.execute("SELECT DISTINCT color FROM po_lines WHERE color<>''"))
+    return {field: sorted(values, key=str.casefold) for field, values in options.items()}

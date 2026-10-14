@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""AI-less tick (run every ~60s). Cheap GET /api/worker/pending for the app account; exits at once if 0.
+"""AI-less tick (run every ~15s). Cheap GET /api/worker/pending for the app account; exits at once if 0.
 If jobs are pending, runs the opencode worker in --drain mode (it exits when the queue is empty). One log line per run."""
-import os, subprocess, sys, time, urllib.request, json
+import os, subprocess, sys, time, urllib.request, urllib.parse, json
+from dotenv import load_dotenv
 from pathlib import Path
 HERE = Path(__file__).resolve().parent
 LOG = HERE / "tick.log"; MAX_LOG = 512 * 1024
 
 def env():
-    for line in (HERE / ".env").read_text().splitlines():
-        if "=" in line and not line.lstrip().startswith("#"):
-            k, v = line.split("=", 1); os.environ.setdefault(k.strip(), v.strip())
+    load_dotenv(HERE / ".env")
 
 def logline(msg):
     if LOG.exists() and LOG.stat().st_size > MAX_LOG:
@@ -20,14 +19,14 @@ def logline(msg):
 def main():
     env()
     owner = os.getenv("APP_ACCOUNT", "fiazul")
-    req = urllib.request.Request(os.environ["APP_URL"].rstrip("/") + f"/api/worker/pending?owner={owner}",
+    req = urllib.request.Request(os.environ["APP_URL"].rstrip("/") + "/api/worker/pending?" + urllib.parse.urlencode({"owner":owner,"worker":os.getenv("WORKER_NAME","tick")}),
                                  headers={"Authorization": "Bearer " + os.environ["WORKER_TOKEN"]})
     try:
         n = json.load(urllib.request.urlopen(req, timeout=90))["pending"]
     except Exception as e:
         logline(f"pending check failed: {e.__class__.__name__}: {str(e)[:120]}"); return
-    if not n:
-        logline("pending=0"); return
+    if not n and not any((HERE / "outbox").glob("*.json")):
+        return
     t = time.time()
     env2 = dict(os.environ, PATH=f"{Path.home()}/.opencode/bin:" + os.environ.get("PATH", ""))
     rc = subprocess.call([str(HERE.parent / ".venv/bin/python"), str(HERE / "box_worker.py"), "--drain"], env=env2,

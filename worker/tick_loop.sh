@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# No crontab on this box: nohup loop, one tick every 15s; flock prevents overlapping ticks.
-# Start:  nohup worker/tick_loop.sh >/dev/null 2>&1 &     (crontab equivalent: * * * * * flock -n /tmp/oe_tick.lock worker/tick.py)
-cd "$(dirname "$0")/.."
+set -u
+cd "$(dirname "$0")/.." || exit 1
+exec 9>"worker/.tick.lock"
+flock -n 9 || exit 0
+trap 'exit 0' INT TERM
 while true; do
-  flock -n /tmp/oe_tick.lock .venv/bin/python worker/tick.py
-  sleep 15
+  .venv/bin/python worker/tick.py
+  sleep "${WORKER_INTERVAL_S:-15}" &
+  wait $! || exit 0
 done
