@@ -62,3 +62,10 @@ def test_lease_renew(tmp_path, monkeypatch):
     jid = db.enqueue_job("p", "m", "t", None, owner="u")
     j = db.claim_job("w", "u")
     assert db.renew_job(j["id"], j["lease_id"]) and not db.renew_job(j["id"], "stale")
+
+def test_po_boundary_grouping():
+    from app.extract import _po_groups
+    assert _po_groups(["Purchase Order: PO1\nx", "more", "Purchase Order: PO2"]) == [(0, 3, 2)]   # few POs: one read
+    pages = [f"Purchase Order: PO{i:03d}" for i in range(10)]
+    g = _po_groups(pages)
+    assert g[0][0] == 0 and g[-1][1] == 10 and all(b > a for a, b, _ in g) and len(g) == 3

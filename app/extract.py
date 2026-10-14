@@ -167,6 +167,22 @@ def ai_primary(ctx) -> bool:
         return True
     return os.getenv("PRIMARY_EXTRACTOR", "ai").lower() == "ai" and config.llm_provider() is not None
 
+PO_HDR = re.compile(r"(?:Purchase\s*Order|P\.?\s*O\.?)\s*(?:No\.?|Number|#)?\s*[:#]\s*([A-Z]*\d[\w\-/]{3,})", re.I)
+
+def _po_groups(texts: list[str]) -> list[tuple[int, int, int]]:
+    """[(first_page, end_page, n_pos)]. One group unless the doc has more than AI_SPLIT_MIN_POS distinct PO headers;
+    then pages are cut only where a new PO starts, AI_POS_PER_READ POs per read."""
+    first = {}
+    for i, t in enumerate(texts):
+        for m in PO_HDR.finditer(t or ""):
+            first.setdefault(m.group(1).upper(), i)
+    if len(first) <= int(os.getenv("AI_SPLIT_MIN_POS", "6")):
+        return [(0, len(texts), len(first))]
+    starts = sorted(set(first.values())); starts[0] = 0
+    per = int(os.getenv("AI_POS_PER_READ", "4"))
+    cuts = starts[::per] + [len(texts)]
+    return [(cuts[k], cuts[k + 1], len([v for v in first.values() if cuts[k] <= v < cuts[k + 1]]) or per) for k in range(len(cuts) - 1)]
+
 def _pdf_units(path: Path, log, ctx):
     import pdfplumber, pymupdf
     try:
@@ -180,15 +196,16 @@ def _pdf_units(path: Path, log, ctx):
     scanned = [i for i, t in enumerate(texts) if len(t.strip()) < 30]
     ctx["category"] = "pdf_scanned" if len(scanned) > len(texts) / 2 else "pdf_text"
     log(f"PDF pages={len(texts)} scanned_pages={len(scanned)}")
-    if not scanned:   # text docs: chunks of a few pages so cross-page tables stay together but output isn't truncated
+    if not scanned:   # whole document in one read; split only multi-PO docs, on PO boundaries
         full = "\n\f".join(texts)
         det = parsers.parse_sap_po(full) if parsers.looks_like_sap_po(full) else None
-        step = int(os.getenv("AI_PAGES_PER_READ", "4"))
-        if len(full) <= int(os.getenv("AI_CHARS_PER_READ", "20000")) or len(texts) <= step:
+        groups = _po_groups(texts)
+        if len(groups) <= 1:
             yield {"text": full, "page": "1-%d" % len(texts), "det": det}
             return
-        for i in range(0, len(texts), step):
-            yield {"text": "\n\f".join(texts[i:i + step]), "page": "%d-%d" % (i + 1, min(i + step, len(texts))), "det": None}
+        log(f"{sum(g[2] for g in groups)} PO headers; reading in {len(groups)} PO-boundary groups")
+        for a0, a1, _ in groups:
+            yield {"text": "\n\f".join(texts[a0:a1]), "page": "%d-%d" % (a0 + 1, a1), "det": None}
         return
     doc = pymupdf.open(path)
     try:
