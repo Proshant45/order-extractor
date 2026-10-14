@@ -21,7 +21,7 @@ body.login{justify-content:center;align-items:center;min-height:100vh}.loginbox{
 .toast{position:fixed;right:20px;top:20px;width:380px;background:#fff;border-radius:8px;box-shadow:0 6px 24px #0003;padding:14px 16px;z-index:9;border-left:4px solid #1e7be6}
 .toast h4{margin:0 0 8px}.toast .x{float:right;cursor:pointer;border:0;background:none;font-size:16px}.toast table{width:100%;font-size:12px}.toast td{padding:2px 4px}
 .logout{margin:16px 6px 0}
-.pill.accepted{background:#dcf5e3;color:#167a33}.pill.needs_review{background:#fde2e2;color:#a12}.pill.reviewed{background:#e6efff;color:#1e5bb8}.review.needs_review{border-left:4px solid #d33}.review.accepted{border-left:4px solid #2a2}tr.bad td{background:#fff3f3}
+.review.needs_review{border-left:4px solid #d33}.review.accepted{border-left:4px solid #2a2}tr.bad td{background:#fff3f3}
 
 input.alt{background:#fff8e1;border-color:#f0c36d}
 .listhead{display:flex;align-items:center;gap:12px;justify-content:space-between}.listhead h3{margin:0}
