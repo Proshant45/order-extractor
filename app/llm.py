@@ -24,33 +24,50 @@ def _json(text: str) -> dict:
         raise ValueError("LLM returned no JSON")
     return json.loads(m.group(0))
 
-def read_page(*, image_png: bytes | None = None, text: str | None = None, extra: str = "", model: str | None = None, prompt: str | None = None) -> dict:
+IMAGE_BATCH_PREFIX=b'OEIMG1:'
+
+def pack_images(images):
+    if not 1<=len(images)<=4:raise ValueError('An image batch must contain 1–4 pages')
+    return IMAGE_BATCH_PREFIX+json.dumps([base64.b64encode(p).decode() for p in images]).encode()
+
+def unpack_images(payload):
+    if not payload or not payload.startswith(IMAGE_BATCH_PREFIX):return None
+    encoded=json.loads(payload[len(IMAGE_BATCH_PREFIX):])
+    if not isinstance(encoded,list) or not 1<=len(encoded)<=4:raise ValueError('Invalid page-image batch')
+    return [base64.b64decode(p,validate=True) for p in encoded]
+
+def read_page(*, image_png: bytes | None = None, images_png: list[bytes] | None = None, text: str | None = None, extra: str = "", model: str | None = None, prompt: str | None = None) -> dict:
     instructions=(prompt if prompt is not None else PROMPT)+extra
     prov = config.llm_provider()
     if prov is None:
         raise RuntimeError("AI reader not enabled on this server (AI_QUEUE/WORKER_TOKEN not set)")
+    images=images_png if images_png is not None else ([image_png] if image_png is not None else [])
+    if images_png is not None:pack_images(images_png)
+    if len(images)>1:instructions+='\nThe images and text describe the same ordered pages; never count the same item twice.'
+    default_model=os.getenv('OPENCODE_FAST_MODEL','opencode/mimo-v2.6-flash-free') if os.getenv('AI_READ_MODE','checked')=='checked' else os.getenv('OPENCODE_MODEL','opencode/big-pickle')
     if text is not None:
         if len(text) > 60000:
             raise ValueError(f"document text too large for one read ({len(text)} chars); split required, no text discarded")
     if prov == "queue":
-        return _json(queue_read(instructions, text=text, image_png=image_png,
-                                 model=model or (os.getenv("OPENCODE_VISION_MODEL", "opencode/mimo-v2.6-flash-free") if image_png
-                                                 else os.getenv("OPENCODE_MODEL", "opencode/big-pickle"))))
+        payload=pack_images(images) if len(images)>1 else (images[0] if images else None)
+        return _json(queue_read(instructions,text=text,image_png=payload,model=model or default_model))
     if prov == "opencode":
         import tempfile
         from pathlib import Path
         from . import opencode_provider
         with tempfile.TemporaryDirectory(dir=config.TMP_DIR) as d:
-            f = Path(d) / ("page.png" if image_png else "page.txt")
-            f.write_bytes(image_png) if image_png else f.write_text(text)
-            model = model or (os.getenv("OPENCODE_VISION_MODEL", "opencode/mimo-v2.6-flash-free") if image_png else os.getenv("OPENCODE_MODEL", "opencode/big-pickle"))
-            return _json(opencode_provider.run(instructions + f"\nThe document is in the attached file {f.name}. Output JSON only.", [f], model=model))
+            files=[]
+            for i,png in enumerate(images):
+                f=Path(d)/f'page-{i+1}.png';f.write_bytes(png);files.append(f)
+            if text is not None:
+                f=Path(d)/'pages.txt';f.write_text(text);files.append(f)
+            return _json(opencode_provider.run(instructions+'\nRead supplied pages in attachment order. Output JSON only.',files,model=model or default_model))
     with httpx.Client(timeout=config.LLM_TIMEOUT_S) as c:
         if prov == "gemini":
             model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")  # dual read uses prompt variants
             parts = [{"text": instructions}]
-            if image_png:
-                parts.append({"inline_data": {"mime_type": "image/png", "data": base64.b64encode(image_png).decode()}})
+            for png in images:
+                parts.append({"inline_data": {"mime_type": "image/png", "data": base64.b64encode(png).decode()}})
             if text:
                 parts.append({"text": "PAGE TEXT:\n" + text})
             r = c.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
@@ -61,8 +78,8 @@ def read_page(*, image_png: bytes | None = None, text: str | None = None, extra:
             return _json(r.json()["candidates"][0]["content"]["parts"][0]["text"])
         model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
         content = [{"type": "text", "text": instructions}]
-        if image_png:
-            content.append({"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(image_png).decode()}})
+        for png in images:
+            content.append({"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(png).decode()}})
         if text:
             content.append({"type": "text", "text": "PAGE TEXT:\n" + text})
         r = c.post("https://api.openai.com/v1/chat/completions",
@@ -82,6 +99,8 @@ def queue_read(prompt, *, text=None, image_png=None, model=None) -> str:
     """Pull model: enqueue a job in SQLite; the box worker claims it over HTTPS, runs opencode, posts the result."""
     import time
     from . import db
+    cached=db.completed_read(getattr(CURRENT,'file_id',None),prompt,model,text,image_png)
+    if cached is not None:return cached
     jid = db.enqueue_job(prompt, model, text, image_png, owner=getattr(CURRENT, "owner", None) or os.getenv("APP_USERNAME"),
                          file_id=getattr(CURRENT,"file_id",None), page=getattr(CURRENT,"page",None), vote=getattr(CURRENT,"vote",None))
     wait = int(os.getenv("AI_JOB_WAIT_S", "900"))

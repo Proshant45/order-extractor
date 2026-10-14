@@ -29,5 +29,5 @@
 <tr><td>Queued / running AI jobs</td><td id="st_q">{{ ws.queued }} / {{ ws.leased }}</td></tr>
 <tr><td>Files waiting for the worker</td><td id="st_qf">{{ ai.queued_files }}</td></tr>
 <tr><td>Results served from cache</td><td id="st_c">{{ ai.cached }}</td></tr></table>
-<p class="muted">Extracted orders are saved as drafts. Agreement means two reads matched; check warnings and missing fields before using the order. Fields where a second AI read saw something different are lightly highlighted in the order form.</p></section>
+<p class="muted">Extracted orders are saved as drafts. Checked means the chunk reads passed available numeric checks. Two reads agree applies only to independent dual reads. Review warnings and missing fields before using the order.</p></section>
 <script src="/static/list.js"></script><script>prog();</script>{% endblock %}

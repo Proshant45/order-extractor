@@ -84,8 +84,25 @@ def models(image: bool) -> tuple[str | None, str | None]:
         return v, os.getenv("OPENCODE_VISION_MODEL_B", v)
     return os.getenv("OPENCODE_MODEL", "opencode/big-pickle"), os.getenv("OPENCODE_MODEL_B", "opencode/mimo-v2.6-flash-free")
 
-def dual_read(*, text: str | None = None, image_png: bytes | None = None, det: dict | None, log) -> dict:
-    ma, mb = models(image_png is not None)
+
+def checked_read(*, text=None, image_png=None, images_png=None, det=None, log, partial=False, context=''):
+    model=os.getenv('OPENCODE_FAST_MODEL','opencode/mimo-v2.6-flash-free')
+    llm.CURRENT.vote='A'
+    extra=''
+    if partial:
+        extra+='\nThis is a continuation chunk. Extract ONLY item rows in this chunk. Printed PO totals cover the whole PO and will be checked after merging. Never repeat earlier rows. Keep any printed totals exactly as shown.'
+    if context:
+        extra+='\nIDENTIFICATION CONTEXT ONLY (do not extract or repeat item rows from this context):\n'+context
+    read=lambda repair:llm.read_page(text=text,image_png=image_png,model=model,extra=extra+repair,**({'images_png':images_png} if images_png is not None else {}))
+    data,errors,attempts=guard.ai_extract_with_guard(read,text,log,max_repairs=1,det=det,partial=partial,check_coverage=True)
+    status='needs_review' if errors else 'checked'
+    log(f'Chunk checks: {status}; reads={attempts}')
+    return {'status':status,'disagreements':[],'arithmetic_errors':guard.arithmetic_errors(data,check_totals=not partial),
+            'votes':{'a':{'data':data,'guard_errors':errors,'attempts':attempts,'model':model},
+                     'b':{'data':None,'guard_errors':[],'attempts':0,'model':None},'deterministic':det},'chosen':'a'}
+
+def dual_read(*, text: str | None = None, image_png: bytes | None = None, images_png=None, det: dict | None, log,partial=False,context='') -> dict:
+    ma, mb = models(image_png is not None or bool(images_png))
     owner = getattr(llm.CURRENT, "owner", None)
     file_id, page = getattr(llm.CURRENT,"file_id",None), getattr(llm.CURRENT,"page",None)
     def vote(model, variant, tag):
@@ -95,9 +112,10 @@ def dual_read(*, text: str | None = None, image_png: bytes | None = None, det: d
                            if m and m != model] if (os.getenv("EXTRACTOR", "").lower() == "opencode" or os.getenv("AI_QUEUE") == "1") and image_png is None else [model]
         last = None
         for m in cands:
-            read = lambda extra, m=m: llm.read_page(text=text, image_png=image_png, extra=variant + extra, model=m)
+            framing=variant+('\nContinuation chunk: never duplicate earlier item rows. Whole-PO totals are checked after merging.' if partial else '')+('\nIdentification context only, no item rows:\n'+context if context else '')
+            read = lambda extra, m=m: llm.read_page(text=text, image_png=image_png, extra=framing + extra, model=m,**({'images_png':images_png} if images_png is not None else {}))
             try:
-                d, errs, n = guard.ai_extract_with_guard(read, text, lambda msg, lvl="info": log(f"[{tag}:{m}] {msg}", lvl), max_repairs=1, det=det)
+                d, errs, n = guard.ai_extract_with_guard(read, text, lambda msg, lvl="info": log(f"[{tag}:{m}] {msg}", lvl), max_repairs=1, det=det,partial=partial)
                 return {"data": d, "guard_errors": errs, "attempts": n, "model": m or "default"}
             except llm.AIUnavailable:
                 raise                    # worker down: queue the whole file, don't burn fallbacks
@@ -113,7 +131,7 @@ def dual_read(*, text: str | None = None, image_png: bytes | None = None, det: d
     if A["data"] is None:   # keep the surviving read but never auto-accept a single vote
         A, B = B, A
     dis = compare(A["data"], B["data"], det) if B["data"] is not None else [{"field": "*", "a": "read ok", "b": "read failed", "deterministic": None}]
-    arith = guard.arithmetic_errors(A["data"])
+    arith = guard.arithmetic_errors(A["data"],check_totals=not partial)
     agreed = not dis and not arith and not A["guard_errors"] and not B["guard_errors"]
     log(f"agreement: {'ACCEPTED' if agreed else 'NEEDS_REVIEW'} disagreements={len(dis)} arithmetic={len(arith)}", "info" if agreed else "warn")
     return {"status": "accepted" if agreed else "needs_review", "disagreements": dis, "arithmetic_errors": arith,

@@ -58,11 +58,11 @@ def extract_document(path: Path, kind: str, doc_type: str, log):
         text = extract._as_text(path,kind)
         if not text or not text.strip():
             raise extract.Skip('Document has no readable text')
-        units = [{'text':text[i:i+60000], 'page':f'text {i+1}-{min(i+60000,len(text))}'} for i in range(0,len(text),60000)]
+        units=[{'text':chunk,'page':f'text chunk {i+1}'} for i,chunk in enumerate(extract._text_chunks(text))]
     fields=[];tables=[];warnings=[];summaries=[];detected=doc_type
     for unit in units:
         llm.CURRENT.page=unit['page'];llm.CURRENT.vote='Document'
-        raw=llm.read_page(prompt=PROMPT,text=unit.get('text'),image_png=unit.get('image'))
+        raw=llm.read_page(prompt=PROMPT,text=unit.get('text'),image_png=unit.get('image'),**({'images_png':unit['images']} if unit.get('images') else {}))
         result=DocumentData.model_validate(raw)
         if not result.fields and not result.tables:
             raise ValueError('AI returned no usable document fields or tables')

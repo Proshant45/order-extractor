@@ -7,7 +7,7 @@ from .schema import Order, to_qty
 def _norm(s):
     return re.sub(r"[^A-Z0-9]", "", str(s or "").upper())
 
-def arithmetic_errors(d: dict) -> list[str]:
+def arithmetic_errors(d: dict, *, check_totals=True) -> list[str]:
     e = []
     for p in d.get("pos") or []:
         tq, tv = 0, 0.0
@@ -23,12 +23,13 @@ def arithmetic_errors(d: dict) -> list[str]:
             if l.get("rate") is not None and l.get("net_value") is not None:
                 if abs(float(l["rate"]) * s - float(l["net_value"])) > 0.011:
                     e.append(f"PO {p.get('po_number')} {l.get('color')}: rate {l['rate']} x {s} != net_value {l['net_value']}")
-                tv += float(l["net_value"])
-        if p.get("stated_total_qty") is not None and int(float(p["stated_total_qty"])) != tq:
+            if l.get('net_value') is not None:
+                tv += float(l['net_value'])
+        if check_totals and p.get("stated_total_qty") is not None and int(float(p["stated_total_qty"])) != tq:
             st = int(float(p["stated_total_qty"]))
             hint = " (looks like per-pack breakup: multiply each size by the number of packs)" if tq and tq < st and st % tq == 0 or (tq and tq * 10 < st) else ""
             e.append(f"PO {p.get('po_number')}: lines sum {tq} != stated_total_qty {p['stated_total_qty']}{hint}")
-        if p.get("stated_total_value") is not None and tv and abs(tv - float(p["stated_total_value"])) > 0.011:
+        if check_totals and p.get("stated_total_value") is not None and any(l.get('net_value') is not None for l in p.get('lines') or []) and abs(tv - float(p["stated_total_value"])) > 0.011:
             e.append(f"PO {p.get('po_number')}: lines value {tv:.2f} != stated_total_value {p['stated_total_value']}")
     return e
 
@@ -85,7 +86,14 @@ def compare_to_deterministic(ai: dict, det: dict) -> list[str]:
                 e.append(f"{l.get('color')} {f} {l[f]} != {g[f]}")
     return e
 
-def ai_extract_with_guard(read, text: str | None, log, max_repairs: int = 2, det=None) -> tuple[dict, list[str], int]:
+PO_NUMBER = re.compile(r"\b(?:Purchase\s*Order|P\.?\s*O\.?)\s*(?:No\.?|Number|#)?\s*[:#]?\s*([A-Z]*\d[\w\-/]{3,})",re.I)
+
+def coverage_errors(d, text):
+    expected={_norm(m.group(1)) for m in PO_NUMBER.finditer(text or '')}
+    found={_norm(p.get('po_number')) for p in d.get('pos') or []}
+    return [f'Printed PO {no} was not extracted' for no in sorted(expected-found)]
+
+def ai_extract_with_guard(read, text: str | None, log, max_repairs: int = 2, det=None, partial=False, check_coverage=False) -> tuple[dict, list[str], int]:
     """read(extra_instructions) -> dict. Returns (result, residual_errors, attempts)."""
     if det is None and text and parsers.looks_like_sap_po(text):
         det = parsers.parse_sap_po(text)
@@ -100,7 +108,11 @@ def ai_extract_with_guard(read, text: str | None, log, max_repairs: int = 2, det
         else:
             try:
                 Order.model_validate(d)
-                errs = arithmetic_errors(d) + text_errors(d, text) + (compare_to_deterministic(d, det) if det else [])
+                errs = arithmetic_errors(d,check_totals=not partial) + text_errors(d, text) + (compare_to_deterministic(d, det) if det else [])
+                if check_coverage:
+                    errs += coverage_errors(d,text)
+                    if not d.get('pos') or any(not p.get('lines') for p in d.get('pos') or []):
+                        errs.append('No usable PO lines extracted')
             except (ValueError, TypeError, AttributeError) as ex:
                 errs = [f"invalid structured output: {ex}"]; d = None
         log(f"AI attempt {attempt}: {len(errs)} guard error(s)" + (": " + "; ".join(errs[:8]) if errs else ""), "warn" if errs else "info")

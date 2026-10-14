@@ -50,7 +50,7 @@ function setStatus(uncertain = '') {
   $('save-state').className = 'pill ' + (uncertain ? 'skipped' : known);
   $('save-state').textContent = uncertain || (dirty ? `${known} · unsaved changes` : known);
   const state = O.extraction_status || 'unverified';
-  const messages = {accepted: 'Two reads agree', needs_review: 'Check highlighted fields', unverified: 'Incomplete checks'};
+  const messages = {accepted: 'Two reads agree', checked: 'Numeric checks passed · single model', needs_review: 'Review mismatches and warnings', unverified: 'Incomplete checks'};
   $('extraction-state').className = Object.hasOwn(messages, state) ? state : 'unverified';
   $('extraction-state').textContent = Object.hasOwn(messages, state) ? `${state.replaceAll('_', ' ')} · ${messages[state]}` : `unverified · Incomplete checks (${state})`;
 }

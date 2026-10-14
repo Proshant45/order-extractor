@@ -181,34 +181,50 @@ def ai_primary(ctx) -> bool:
         return True
     return os.getenv("PRIMARY_EXTRACTOR", "ai").lower() == "ai" and config.llm_provider() is not None
 
-PO_HDR = re.compile(r"(?:Purchase\s*Order|P\.?\s*O\.?)\s*(?:No\.?|Number|#)?\s*[:#]\s*([A-Z]*\d[\w\-/]{3,})", re.I)
+PO_HDR = re.compile(r"\b(?:Purchase\s*Order|P\.?\s*O\.?)\s*(?:No\.?|Number|#)?\s*[:#]?\s*([A-Z]*\d[\w\-/]{3,})", re.I)
 
 def _po_groups(texts: list[str]) -> list[tuple[int, int, int]]:
-    """[(first_page, end_page, n_pos)]. One group unless the doc has more than AI_SPLIT_MIN_POS distinct PO headers;
-    then pages are cut only where a new PO starts, AI_POS_PER_READ POs per read."""
+    """Separate new POs at page boundaries; repeated headers are continuations."""
     first = {}
     for i, t in enumerate(texts):
         for m in PO_HDR.finditer(t or ""):
             first.setdefault(m.group(1).upper(), i)
-    if len(first) <= int(os.getenv("AI_SPLIT_MIN_POS", "6")):
+    if not first:
         return [(0, len(texts), len(first))]
     starts = sorted(set(first.values())); starts[0] = 0
-    per = int(os.getenv("AI_POS_PER_READ", "4"))
-    cuts = starts[::per] + [len(texts)]
+    cuts = starts + [len(texts)]
     return [(cuts[k], cuts[k + 1], len([v for v in first.values() if cuts[k] <= v < cuts[k + 1]]) or per) for k in range(len(cuts) - 1)]
 
 def _bounded_groups(texts, groups):
     out = []
+    max_pages=max(3,min(4,int(os.getenv('AI_CHUNK_PAGES','4'))))
     for lo, hi, count in groups:
         start, length = lo, 0
         for page in range(lo, hi):
             n = len(texts[page])
-            if n > 60000: raise Skip(f"PDF page {page + 1} exceeds 60000 text characters; no partial order saved")
-            if page > start and length + 2 + n > 60000:
+            if n > config.AI_CHUNK_MAX_CHARS: raise Skip(f"PDF page {page + 1} exceeds {config.AI_CHUNK_MAX_CHARS} text characters; no partial order saved")
+            if page > start and (page-start>=max_pages or length + 2 + n > config.AI_CHUNK_MAX_CHARS):
                 out.append((start, page, count)); start, length = page, 0
             length += n + (2 if page > start else 0)
         out.append((start, hi, count))
     return out
+
+
+def _text_chunks(text):
+    current='';limit=config.AI_CHUNK_MAX_CHARS
+    for line in text.splitlines(keepends=True):
+        while len(line)>limit:
+            if current:yield current;current=''
+            yield line[:limit];line=line[limit:]
+        if len(current)+len(line)>limit:
+            yield current;current=''
+        current+=line
+    if current:yield current
+
+
+def _po_context(text):
+    lines=[line.strip() for line in text.splitlines() if re.search(r'purchase\s*order|\bPO\b|buyer|brand|vendor|supplier|factory|style|department|destination|date|currency|contract',line,re.I) and not re.search(r'quantity|\bqty\b|total|net\s*value|\brate\b',line,re.I)]
+    return '\n'.join(lines[:30])[:4000]
 
 def _pdf_units(path: Path, log, ctx):
     import pdfplumber, pymupdf
@@ -225,31 +241,42 @@ def _pdf_units(path: Path, log, ctx):
     scanned = [i for i, t in enumerate(texts) if len(t.strip()) < 30]
     ctx["category"] = "pdf_scanned" if len(scanned) > len(texts) / 2 else "pdf_text"
     log(f"PDF pages={len(texts)} scanned_pages={len(scanned)}")
-    if not scanned:   # whole document in one read; split only multi-PO docs, on PO boundaries
+    full='\n\f'.join(texts);ctx['_document_text']=full
+    po_groups=_po_groups(texts);groups=_bounded_groups(texts,po_groups)
+    if not scanned:
         full = "\n\f".join(texts)
         det = parsers.parse_sap_po(full) if parsers.looks_like_sap_po(full) else None
-        groups = _bounded_groups(texts, _po_groups(texts))
-        if len(groups) <= 1:
-            yield {"text": full, "page": "1-%d" % len(texts), "det": det}
-            return
-        log(f"{sum(g[2] for g in groups)} PO headers; reading in {len(groups)} bounded page groups")
-        for a0, a1, _ in groups:
-            yield {"text": "\n\f".join(texts[a0:a1]), "page": "%d-%d" % (a0 + 1, a1), "det": None}
+        ctx['_document_det']=det
+        ctx['_document_text']=full
+        po_groups=_po_groups(texts)
+        groups=_bounded_groups(texts,po_groups)
+        log(f'Reading {len(texts)} pages in {len(groups)} chunks (up to 4 pages, new PO boundaries respected)')
+        for a0,a1,_ in groups:
+            lo,hi,_=next(g for g in po_groups if g[0]<=a0<g[1])
+            partial=a0>lo or a1<hi
+            yield {'text':'\n\f'.join(texts[a0:a1]),'page':f'{a0+1}-{a1}','det':det if len(groups)==1 else None,
+                   'partial':partial,'context':_po_context(texts[lo]) if a0>lo else ''}
         return
     doc = pymupdf.open(path)
     try:
-        for i in range(min(len(doc), config.MAX_PAGES)):
-            if i in scanned:
-                pix = doc[i].get_pixmap(dpi=config.RENDER_DPI); png = pix.tobytes("png"); del pix
-                yield {"image": png, "page": str(i + 1), "det": None}
-            else:
-                yield {"text": texts[i], "page": str(i + 1), "det": None}
+        for lo,hi,_ in groups:
+            pglo,pghi,_=next(g for g in po_groups if g[0]<=lo<g[1])
+            unit={'page':f'{lo+1}-{hi}','det':None,'partial':lo>pglo or hi<pghi,'context':_po_context(texts[pglo]) if lo>pglo else ''}
+            text='\n\f'.join(texts[lo:hi])
+            if text.strip():unit['text']=text
+            if any(i in scanned for i in range(lo,hi)):
+                images=[]
+                for i in range(lo,hi):
+                    pix=doc[i].get_pixmap(dpi=config.RENDER_DPI);images.append(pix.tobytes('png'));del pix
+                if len(images)==1:unit['image']=images[0]
+                else:unit['images']=images
+            yield unit
     finally:
         doc.close()
 
 def extract_ai_primary(path: Path, kind: str, log, ctx) -> tuple[dict, str]:
     from . import consensus
-    _need_llm(log, f"{kind} (AI-primary dual read)")
+    _need_llm(log, f"{kind} structured AI read")
     if kind == "pdf":
         units = _pdf_units(path, log, ctx)
     elif kind in ("image", "unknown") and not (kind == "unknown" and _as_text(path, kind)):
@@ -267,16 +294,21 @@ def extract_ai_primary(path: Path, kind: str, log, ctx) -> tuple[dict, str]:
                 det = parsers.parse_table_rows(parsers.iter_csv(path) if kind == "csv" else parsers.iter_xlsx(path))
         except Exception:
             det = None
-        units = [{"text": txt, "page": "1", "det": det}]
-    A, B, dis, arith, gerr, status, used_det = [], [], [], [], [], "accepted", False
+        chunks=list(_text_chunks(txt));ctx['_document_text']=txt;ctx['_document_det']=det
+        units=[{'text':chunk,'page':f'text {i+1}/{len(chunks)}','det':det if len(chunks)==1 else None,
+                'partial':len(chunks)>1,'context':_po_context(txt) if i else ''} for i,chunk in enumerate(chunks)]
+    checked=os.getenv('AI_READ_MODE','checked' if config.llm_provider() in ('queue','opencode') else 'dual')=='checked'
+    A, B, dis, arith, gerr, status, used_det = [], [], [], [], [], "checked" if checked else "accepted", False
     owner = getattr(llm.CURRENT, "owner", None)
     file_id = getattr(llm.CURRENT,"file_id",None)
     def _one(u):
         llm.CURRENT.owner = owner
         llm.CURRENT.file_id = file_id; llm.CURRENT.page = u["page"]
-        return consensus.dual_read(text=u.get("text"), image_png=u.get("image"), det=u["det"], log=log)
+        if checked:
+            return consensus.checked_read(text=u.get('text'),image_png=u.get('image'),images_png=u.get('images'),det=u['det'],log=log,partial=u.get('partial',False),context=u.get('context',''))
+        return consensus.dual_read(text=u.get("text"), image_png=u.get("image"), images_png=u.get('images'),det=u["det"], log=log,partial=u.get('partial',False),context=u.get('context',''))
     from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=int(os.getenv("AI_PAGE_PARALLEL", "2"))) as ex:
+    with ThreadPoolExecutor(max_workers=int(os.getenv("AI_PAGE_PARALLEL", "1" if checked else "2"))) as ex:
         units = list(units)
         results = list(ex.map(_one, units))      # pages read concurrently, merged in page order
     for u, r in zip(units, results):
@@ -287,12 +319,17 @@ def extract_ai_primary(path: Path, kind: str, log, ctx) -> tuple[dict, str]:
         gerr += [f"[{v}] {e}" for v in ("a", "b") for e in r["votes"][v]["guard_errors"]]
         ctx.setdefault("models", {"a": r["votes"]["a"]["model"], "b": r["votes"]["b"]["model"]})
         ctx["attempts"] = max(ctx.get("attempts") or 0, r["votes"]["a"]["attempts"], r["votes"]["b"]["attempts"])
-        if r["status"] != "accepted":
+        if r["status"] not in ("accepted","checked"):
             status = "needs_review"
     a, b = llm.merge_pages(A), llm.merge_pages(B)
     from . import guard
     merged_errors = guard.arithmetic_errors(a) + guard.arithmetic_errors(b)
     merged_conflicts = (a.get("_merge_conflicts") or []) + (b.get("_merge_conflicts") or [])
+    if ctx.get('_document_det'):
+        used_det=True
+        merged_errors+=guard.compare_to_deterministic(a,ctx['_document_det'])
+    if ctx.get('_document_text'):
+        merged_errors+=guard.coverage_errors(a,ctx['_document_text'])
     if merged_errors or merged_conflicts:
         status = "needs_review"
         arith += ["merged document: " + e for e in dict.fromkeys(merged_errors)]
@@ -308,7 +345,7 @@ def extract_ai_primary(path: Path, kind: str, log, ctx) -> tuple[dict, str]:
                         "models": ctx.get("models"), "version_a": a, "version_b": b,
                         "deterministic_vote": used_det}
     ctx["guard_errors"] = arith + gerr
-    return a, f"{kind}_ai_dual"
+    return a, f"{kind}_ai_checked" if checked else f"{kind}_ai_dual"
 
 def preview_text(path: Path, kind: str) -> str | None:
     """Cheap, bounded text for classification (first 3 pages / first rows)."""

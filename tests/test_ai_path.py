@@ -12,6 +12,7 @@ def _po(page):
                                 "rate": 2.0, "net_value": 2.0 * (10 * page + 5)}]}]}
 
 def _run(monkeypatch, reader, path=SAMPLE):
+    monkeypatch.setenv('AI_READ_MODE','dual')
     monkeypatch.setenv("EXTRACTOR", "opencode"); monkeypatch.setenv("OPENCODE_FALLBACK_MODELS", "")
     monkeypatch.setattr(extract, "_need_llm", lambda *a, **k: None)
     monkeypatch.setattr(llm, "read_page", reader)
@@ -44,7 +45,7 @@ def test_pages_all_mapped_and_agreeing_accepted(monkeypatch):
 def test_disagreement_flags_review(monkeypatch):
     def reader(text=None, image_png=None, extra="", model=None):
         d = _po(1)
-        if extra:   # read B prompt variant
+        if 'SECOND INDEPENDENT READ' in extra:
             d["pos"][0]["lines"][0]["sizes"]["S"] = 11; d["pos"][0]["lines"][0]["order_qty"] = 16; d["pos"][0]["lines"][0]["net_value"] = 32.0
         return d
     _, c = _run(monkeypatch, reader)
@@ -65,7 +66,7 @@ def test_lease_renew(tmp_path, monkeypatch):
 
 def test_po_boundary_grouping():
     from app.extract import _po_groups
-    assert _po_groups(["Purchase Order: PO10001\nx", "more", "Purchase Order: PO10002"]) == [(0, 3, 2)]   # few POs: one read
+    assert _po_groups(["Purchase Order: PO10001\nx", "more", "Purchase Order: PO10002"]) == [(0, 2, 1),(2,3,1)]
     pages = [f"Purchase Order: PO{i:05d}" for i in range(10)]
     g = _po_groups(pages)
-    assert g[0][0] == 0 and g[-1][1] == 10 and all(b > a for a, b, _ in g) and len(g) == 3
+    assert g[0][0] == 0 and g[-1][1] == 10 and all(b > a for a, b, _ in g) and len(g) == 10

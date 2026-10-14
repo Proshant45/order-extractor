@@ -57,9 +57,10 @@ def init():
         jcols = {r[1] for r in c.execute("PRAGMA table_info(ai_jobs)")}
         if "owner" not in jcols:
             c.execute("ALTER TABLE ai_jobs ADD COLUMN owner TEXT")
-        for name, declaration in (("file_id", "INTEGER"), ("page", "TEXT"), ("vote", "TEXT"), ("stage", "TEXT"), ("received_at", "TEXT"), ("started_at", "TEXT"), ("output_at", "TEXT"), ("returned_at", "TEXT")):
+        for name, declaration in (("file_id", "INTEGER"), ("page", "TEXT"), ("vote", "TEXT"), ("stage", "TEXT"), ("received_at", "TEXT"), ("started_at", "TEXT"), ("output_at", "TEXT"), ("returned_at", "TEXT"), ('read_key','TEXT')):
             if name not in jcols: c.execute(f"ALTER TABLE ai_jobs ADD COLUMN {name} {declaration}")
         c.execute("CREATE INDEX IF NOT EXISTS ai_jobs_file ON ai_jobs(file_id,id)")
+        c.execute('CREATE INDEX IF NOT EXISTS ai_jobs_read ON ai_jobs(read_key,status)')
         fcols = {r[1] for r in c.execute("PRAGMA table_info(files)")}
         if "source_path" not in fcols: c.execute("ALTER TABLE files ADD COLUMN source_path TEXT")
         if "budget_file_id" not in fcols: c.execute("ALTER TABLE files ADD COLUMN budget_file_id INTEGER")
@@ -190,8 +191,24 @@ def enqueue_job(prompt, model, text, image, owner=None, *, file_id=None, page=No
     with conn() as c:
         c.execute("BEGIN IMMEDIATE")
         _reserve_file_budget(c, file_id)
-        return c.execute("INSERT INTO ai_jobs(status,prompt,model,text,image,owner,created_at,updated_at,file_id,page,vote,stage) VALUES('queued',?,?,?,?,?,?,?,?,?,?, 'queued')",
-                         (prompt, model, text, image, owner, now(), now(), file_id, page, vote)).lastrowid
+        return c.execute("INSERT INTO ai_jobs(status,prompt,model,text,image,owner,created_at,updated_at,file_id,page,vote,stage,read_key) VALUES('queued',?,?,?,?,?,?,?,?,?,?, 'queued',?)",
+                         (prompt, model, text, image, owner, now(), now(), file_id, page, vote,read_key(prompt,model,text,image))).lastrowid
+
+
+def read_key(prompt,model,text,image):
+    import hashlib
+    h=hashlib.sha256(json.dumps([prompt,model,text],ensure_ascii=False).encode())
+    h.update(image or b'')
+    return h.hexdigest()
+
+
+def completed_read(file_id,prompt,model,text,image):
+    if file_id is None:return None
+    with conn() as c:
+        root=c.execute('SELECT COALESCE(budget_file_id,id) root FROM files WHERE id=?',(file_id,)).fetchone()
+        if not root:return None
+        row=c.execute("SELECT j.result FROM ai_jobs j JOIN files f ON f.id=j.file_id WHERE COALESCE(f.budget_file_id,f.id)=? AND j.read_key=? AND j.status='done' AND j.result IS NOT NULL ORDER BY j.id DESC LIMIT 1",(root['root'],read_key(prompt,model,text,image))).fetchone()
+        return row['result'] if row else None
 
 def pending_jobs(owner):
     """Cheap count for the box cron tick: queued jobs (or expired leases) belonging to the given app account."""
@@ -215,7 +232,7 @@ def cancel_job(jid):
     with conn() as c:
         c.execute("UPDATE ai_jobs SET status='cancelled', updated_at=? WHERE id=? AND status IN ('queued','leased')", (now(), jid))
 
-def claim_job(worker, owner=None):
+def claim_job(worker, owner=None, *, image_batches=True):
     """Atomically lease the oldest queued job (or one whose lease expired). Returns job dict incl. lease_id."""
     t = _time.time()
     with conn() as c:
@@ -223,7 +240,7 @@ def claim_job(worker, owner=None):
         c.execute("UPDATE ai_jobs SET status=CASE WHEN attempts>=? THEN 'error' ELSE 'queued' END, error=CASE WHEN attempts>=? THEN 'lease expired too often' ELSE error END "
                   "WHERE status='leased' AND lease_until<?", (MAX_JOB_ATTEMPTS, MAX_JOB_ATTEMPTS, t))
         while True:
-            r = c.execute("SELECT id,prompt,model,text,image,file_id,page,vote FROM ai_jobs WHERE status='queued' AND (? IS NULL OR owner=?) ORDER BY id LIMIT 1", (owner, owner)).fetchone()
+            r = c.execute("SELECT id,prompt,model,text,image,file_id,page,vote FROM ai_jobs WHERE status='queued' AND (? IS NULL OR owner=?) AND (? OR image IS NULL OR substr(image,1,7)<>?) ORDER BY id LIMIT 1", (owner,owner,int(image_batches),b'OEIMG1:')).fetchone()
             if not r: return None
             try: _reserve_file_budget(c, r["file_id"])
             except ProcessingLimit as e:

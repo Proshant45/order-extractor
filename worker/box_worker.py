@@ -67,12 +67,16 @@ def _handle(c, j):
         if ev.get("type") == "text": progress("output_received")
     progress("starting")
     with tempfile.TemporaryDirectory(prefix="oew_") as d:
-        f = Path(d) / ("page.png" if j.get("image_b64") else "page.txt")
-        f.write_bytes(base64.b64decode(j["image_b64"])) if j.get("image_b64") else f.write_text(j.get("text") or "")
         try:
+            files=[]
+            images=j.get('images_b64') or ([j['image_b64']] if j.get('image_b64') else [])
+            for index,encoded in enumerate(images):
+                f=Path(d)/f'page-{index+1}.png';f.write_bytes(base64.b64decode(encoded,validate=True));files.append(f)
+            if j.get('text') is not None or not images:
+                f=Path(d)/'pages.txt';f.write_text(j.get('text') or '');files.append(f)
             if len(j.get("text") or "") > int(os.getenv("WORKER_MAX_TEXT", "60000")):
                 raise RuntimeError(f"document text too large for one AI read ({len(j['text'])} chars); needs manual review")
-            out = opencode_provider.run(j["prompt"] + ("\nThe page image is attached. Output JSON only." if j.get("image_b64") else "\nOutput JSON only."), [f],
+            out = opencode_provider.run(j["prompt"] + '\nRead supplied pages in attachment order. Output JSON only.',files,
                                         j.get("model"), min(int(os.getenv("OPENCODE_TIMEOUT_S", "300")), j.get("lease_s", 360) - 30), on_event=event, stop_event=stop)
             body = {"id": j["id"], "lease_id": j["lease_id"], "text": out}
         except Exception as e:
@@ -135,7 +139,7 @@ def loop(i):
         while not stop.is_set():
             try:
                 flush_outbox(c)
-                r = c.get(URL + "/api/worker/next", params={"worker": f"{NAME}-{i}", "owner": OWNER}, headers=H)
+                r = c.get(URL + "/api/worker/next", params={"worker": f"{NAME}-{i}", "owner": OWNER,'image_batches':1}, headers=H)
                 if r.status_code == 204:
                     empty += 1
                     if DRAIN and empty >= int(os.getenv("DRAIN_IDLE_POLLS", "6")) and busy[0] == 0:

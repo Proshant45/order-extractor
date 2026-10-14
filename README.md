@@ -12,9 +12,7 @@ in a Texora360-style New Order page you can review, edit and save. Login require
 2. **Cache**: every file / ZIP entry is hashed (SHA-256). Identical bytes already extracted are served from the stored result (`cached`).
 3. **Classify**: purchase_order, sales_contract, proforma_invoice, control_sheet, tech_pack, bom, other. Order-type documents are extracted;
    tech packs / BOMs / other are stored with their type and style/PO references and linked per buyer (`GET /api/links`).
-4. **AI read**: each order document is read twice by opencode free models and saved as an order draft after the reads and checks finish.
-   A second independent read (read B) is compared field by field; fields where it differs are lightly highlighted in the
-   order form (hover shows read B's value). There is no review queue. Arithmetic checks (size sums, qty x rate, totals) show as warnings.
+4. **AI read**: OpenCode workers use one fast free read per chunk by default. PDFs use up to 4 pages, split at new PO boundaries when printed headers can be read, with a 30,000-character input cap. Scanned chunks attach all page images in order. A chunk with invalid output or failed checks gets one repair read. Completed queue reads are reused during file retries. Size sums, quantity × rate, printed totals, PO coverage and supported deterministic layouts are checked; full-PO totals are checked again after chunks merge. Unresolved errors stay visible as warnings. `checked` means single-model validation passed; it does not mean two readers agreed. Explicit `AI_READ_MODE=dual` retains independent reads and highlighted differences.
 5. **Store**: SQLite tables `files`, `orders`, `pos`, `po_lines`, `extraction_logs`, `ai_jobs`, `batches`, `kv`.
 
 ## AI worker (pull model)
@@ -76,3 +74,9 @@ On the first startup with this update, `app.maintenance.clear_existing_queue_onc
 ## Editable supporting document data
 
 Supporting files also use OpenCode to extract structured fields and tables when AI is configured. Tech-pack measurements/construction and BOM materials/consumption remain document data rather than purchase orders. The document page provides editable values, add/remove table rows and a Save document data button. Saves are schema-validated and read back before success is displayed. The original extraction stays preserved separately; manual edits clear AI verification and invalidate older cached data. These reads share the persistent 20-file budget. Classification-only files are freshly extracted on re-upload with AI enabled. Supporting-file AI output is marked as needing source review. `PUT /api/files/{id}/data` saves these values; order documents use the existing order form.
+
+## Free-model chunk settings
+
+`OPENCODE_FAST_MODEL` defaults to `opencode/mimo-v2.6-flash-free`. `AI_CHUNK_PAGES` can be 3 or 4 (default 4); dense pages may require smaller groups to respect `AI_CHUNK_MAX_CHARS` (default 30000). Long spreadsheet/text inputs are split with every row retained. Keep the server text cap at or below the box's `WORKER_MAX_TEXT`. The default checked path prepares one chunk at a time; `AI_PAGE_PARALLEL` can override this. Existing `OPENCODE_MODEL`/`OPENCODE_MODEL_B` settings apply to explicit dual mode rather than overriding the fast checked reader.
+
+Deploy the web app **and update/restart `worker/box_worker.py` on the box**. Updated workers advertise `image_batches=1` and forward every page image to OpenCode; older workers cannot claim multi-page image jobs, so they cannot silently read only the first page. Text and single-image jobs remain compatible. The system-wide 20-file allowance still counts documents, not their chunks, page images or retries. A chunk can pass arithmetic checks while containing a source-reading error; source review remains necessary.

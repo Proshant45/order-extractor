@@ -158,7 +158,7 @@ def process_one(path: Path, name: str, parent_id=None, size=None, sha=None, forc
             cons = {"status": "needs_review", "disagreements": [], "arithmetic_errors": [],
                     "reason": "single source: deterministic parser only (no AI reader configured)", "models": None}
         db.set_review(oid, cons["status"], cons)
-        lg(f"agreement status: {cons['status']}", "info" if cons["status"] == "accepted" else "warn")
+        lg(f"verification status: {cons['status']}", "info" if cons["status"] in ("accepted","checked") else "warn")
         db.update_file(fid, status="done", method=method, doc_type=ctx.get("doc_type"),
                        meta=json.dumps({"doc_type": ctx.get("doc_type"), "buyer_hint": ctx.get("buyer_hint"), **(ctx.get("refs") or {}),
                                         "po_numbers": [p.po_number for p in order.pos], "styles": [order.style_number]}))
@@ -222,6 +222,7 @@ def summarize(items, upload_name, zipped):
             "extracted_ok": sum(i["status"] == "done" for i in items),
             "skipped": sum(i["status"] == "skipped" for i in items),
             "accepted": sum(i.get("review_status") == "accepted" for i in items),
+            "checked": sum(i.get("review_status") == "checked" for i in items),
             "needs_review": sum(i.get("review_status") == "needs_review" for i in items),
             "failed": sum(i["status"] == "failed" for i in items),
             "queued_ai": sum(i["status"] == "queued_ai" for i in items),
@@ -449,16 +450,19 @@ def worker_pending(owner: str = "", worker: str = "tick"):
     return {"pending": db.pending_jobs(acct)}
 
 @app.get("/api/worker/next")
-def worker_next(worker: str = "box", owner: str = ""):
+def worker_next(worker: str = "box", owner: str = "", image_batches:int=0):
     db.heartbeat(worker)
     acct = os.getenv("APP_USERNAME", "")
     if owner != acct:
         return Response(status_code=204)
-    j = db.claim_job(worker, acct)
+    j = db.claim_job(worker, acct,image_batches=bool(image_batches))
     if not j:
         return Response(status_code=204)
     if j.get("image") is not None:
-        j["image_b64"] = _b64.b64encode(j.pop("image")).decode()
+        images=llm.unpack_images(j['image'])
+        if images is not None:
+            j['images_b64']=[_b64.b64encode(p).decode() for p in images];j.pop('image')
+        else:j["image_b64"] = _b64.b64encode(j.pop("image")).decode()
     else:
         j.pop("image", None)
     return j

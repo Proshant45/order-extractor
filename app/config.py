@@ -14,6 +14,7 @@ RENDER_DPI = int(os.getenv("RENDER_DPI", "150"))
 MAX_IMAGE_PX = int(os.getenv("MAX_IMAGE_PX", "2000"))
 EXTRACT_TIMEOUT_S = int(os.getenv("EXTRACT_TIMEOUT_S", "300"))
 LLM_TIMEOUT_S = int(os.getenv("LLM_TIMEOUT_S", "90"))
+AI_CHUNK_MAX_CHARS = max(1000,min(60000,int(os.getenv('AI_CHUNK_MAX_CHARS','30000'))))
 # zip guards
 ZIP_MAX_ENTRIES = int(os.getenv("ZIP_MAX_ENTRIES", "200"))
 ZIP_MAX_TOTAL_BYTES = int(os.getenv("ZIP_MAX_TOTAL_MB", "400")) * 1024 * 1024
