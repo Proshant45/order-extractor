@@ -4,7 +4,7 @@
 <section class="card"><h3>Auto Extract from document</h3>
 <form id="up" class="drop"><input type="file" name="file" id="f" accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.xlsx,.csv,.docx,.zip">
 <button class="btn dark" type="submit">Upload &amp; Extract</button><span class="hint">One file at a time (or a .zip). PDF, image, XLSX, CSV, DOCX. Max {{max_mb}} MB.</span></form>
-<div id="res"></div></section>
+<div id="res"></div><div id="prog"></div></section>
 <section class="card"><div class="listhead"><h3>Orders</h3>
 <form method="get" action="/" class="search"><input name="q" value="{{ q }}" placeholder="Search buyer, PO, style, file…"><button class="btn ghost sm">Search</button>{% if q %} <a href="/" class="btn ghost sm">Clear</a>{% endif %}</form>
 <a class="btn dark" href="/orders/new">＋ New Order</a></div>
@@ -41,6 +41,20 @@ ${Object.entries(S.by_doc_type||{}).filter(([k,v])=>v).map(([k,v])=>`<tr><td>◦
 ${S.skipped_reasons.length?'<details open><summary>Skipped / failed reasons</summary><ul>'+S.skipped_reasons.map(x=>`<li>${x.name}: ${x.reason}</li>`).join('')+'</ul></details>':''}`;document.body.appendChild(t);
 r.innerHTML='<table class="grid"><tr><th>File</th><th>Status</th><th>Detail</th></tr>'+j.items.map(i=>`<tr><td>${i.name}</td><td><span class="pill ${i.status}">${i.status}</span></td><td>${i.order_id?`<a href="/orders/${i.order_id}">open order ${i.order_id}</a> `:''}${i.reason||''}${(i.warnings||[]).length?' · '+i.warnings.length+' warning(s)':''}</td></tr>`).join('')+'</table>';
 const done=j.items.filter(i=>i.order_id);};
+const STEPS=['Uploaded','Queued','Reading','Order saved'];
+function fmtEta(s){if(s<60)return 'under a minute';const m=Math.round(s/60);return m<90?`about ${m} min`:`about ${(m/60).toFixed(1)} h`}
+async function prog(){try{const p=await (await fetch('/api/progress')).json();const el=document.getElementById('prog');if(!p.files){el.innerHTML='';return}
+ const idx={queued:1,reading:2,saved:3};
+ const head=p.active?`<div class="eta"><b>${fmtEta(p.eta_s)} left</b> (${p.order_docs_done} of ${p.order_docs} order documents done · ${p.finished}/${p.total} files · ~${Math.round(p.avg_s_per_doc/60*10)/10} min per document)</div>`
+   :`<div class="eta"><b>Finished</b> · ${p.total} files</div>`;
+ el.innerHTML=head+'<table class="grid flow"><tbody>'+p.files.map(f=>{const n=f.name.split('/').slice(-2).join('/');
+  let line;if(f.step==='failed')line=STEPS.slice(0,3).map(x=>`<span class="st done">${x}</span>`).join('›')+`›<span class="st bad">Failed: ${(f.reason||'').slice(0,90)}</span>`;
+  else if(f.step==='skipped')line=`<span class="st done">Uploaded</span>›<span class="st muted">Skipped${f.reason?': '+f.reason.slice(0,80):''}</span>`;
+  else if(f.step==='classified')line=`<span class="st done">Uploaded</span>›<span class="st done">Read</span>›<span class="st muted">Not an order (tech pack / BOM / other)</span>`;
+  else{const k=idx[f.step]??0;line=STEPS.map((x,i)=>`<span class="st ${i<k?'done':i===k?'cur':''}">${i===3&&f.order_id?`<a href="/orders/${f.order_id}">${x}</a>`:x}</span>`).join('›')}
+  return `<tr><td>${n}</td><td>${line}</td></tr>`}).join('')+'</tbody></table>';
+ if(!p.active&&!window._reloaded&&p.finished){window._reloaded=1}}catch(e){}}
+prog();setInterval(prog,5000);
 setInterval(async()=>{try{const w=await (await fetch('/api/ai-status')).json();const e=document.getElementById('aiw');e.className='pill '+(w.online?'done':'failed');
 e.textContent='AI worker '+(w.online?'online':'offline')+(w.last_seen_s!=null?' · seen '+w.last_seen_s+'s ago':'')+' · queue '+w.queued+(w.queued_files?' · '+w.queued_files+' file(s) waiting':'');
 const o=document.getElementById('st_online');o.className='pill '+(w.online?'done':'failed');o.textContent=w.online?'online':'offline';

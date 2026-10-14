@@ -1,5 +1,5 @@
 from __future__ import annotations
-import asyncio, hashlib, json, logging, os, re, tempfile
+import asyncio, hashlib, json, logging, os, re, tempfile, zipfile
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -222,13 +222,63 @@ def process_upload(path: Path, name: str, size: int, sha: str, force_ai=False, o
     db.log(log_id, "UPLOAD SUMMARY " + json.dumps(sm), "summary")
     return res
 
+# ---- live progress (in memory; one extraction at a time) ----
+PROG: dict = {}          # bid -> {"name", "files": [{name, step, reason, order_id, t0, t1, order_doc}], "started"}
+PROG_LAST = [None]
+_tl = threading.local()
+
+def _prog_files(bid, names):
+    from . import classify
+    P = PROG.setdefault(bid, {"files": [], "started": __import__("time").time()})
+    for n in names:
+        P["files"].append({"name": n, "step": "queued", "reason": None, "order_id": None, "t0": None, "t1": None,
+                           "order_doc": classify.classify(n, "")[0] in classify.ORDER_TYPES or classify.classify(n, "")[0] == "other"})
+
+def _prog_set(name, **kw):
+    bid = getattr(_tl, "bid", None)
+    if not bid or bid not in PROG: return
+    import time as _t
+    for f in PROG[bid]["files"]:
+        if f["name"] == name and f["step"] not in ("saved", "failed", "skipped", "classified"):
+            if kw.get("step") == "reading": kw.setdefault("t0", _t.time())
+            if kw.get("step") in ("saved", "failed", "skipped", "classified"): kw.setdefault("t1", _t.time())
+            f.update(kw); return
+
+def progress(bid):
+    import time as _t
+    P = PROG.get(bid)
+    if not P: return None
+    fs = P["files"]; fin = [f for f in fs if f["t1"]]
+    timed = [f["t1"] - f["t0"] for f in fin if f["t0"] is not None and f["step"] in ("saved", "failed") and f["t1"] - f["t0"] > 5]
+    avg = sum(timed[-8:]) / len(timed[-8:]) if timed else 150.0      # rolling avg seconds per order doc
+    remaining_docs = sum(1 for f in fs if not f["t1"] and f["order_doc"])
+    cur = next((f for f in fs if f["step"] == "reading"), None)
+    eta = remaining_docs * avg - (min(_t.time() - cur["t0"], avg * 0.9) if cur and cur["t0"] else 0)
+    docs = [f for f in fs if f["order_doc"]]
+    return {"batch_id": bid, "name": P.get("name"), "total": len(fs), "finished": len(fin),
+            "order_docs": len(docs), "order_docs_done": sum(1 for f in docs if f["t1"]),
+            "avg_s_per_doc": round(avg), "eta_s": max(0, round(eta)) if remaining_docs else 0,
+            "active": len(fin) < len(fs), "files": [{k: f[k] for k in ("name", "step", "reason", "order_id")} for f in fs]}
+
 def _process_upload(path: Path, name: str, size: int, sha: str, force_ai=False) -> dict:
+    bid = getattr(_tl, "bid", None)
+    if bid:
+        try:
+            if zipfile.is_zipfile(path):
+                with zipfile.ZipFile(path) as z:
+                    _prog_files(bid, [i.filename for i in z.infolist() if not i.is_dir() and not zipio.junk_reason(i.filename)])
+            else:
+                _prog_files(bid, [name])
+        except Exception:
+            _prog_files(bid, [name])
     try:
         top = extract.sniff(path)
     except extract.Skip:
         top = "zip"   # corrupt zip container: iter_zip records it as skipped
     if top != "zip":
-        return {"items": [process_one(path, name, size=size, sha=sha, force_ai=force_ai)]}
+        _prog_set(name, step="reading")
+        it = process_one(path, name, size=size, sha=sha, force_ai=force_ai); _prog_done(it)
+        return {"items": [it]}
     zid = db.add_file(name, kind="zip", size=size, sha=sha)
     items = []
     for ename, tmp, reason in zipio.iter_zip(path):
@@ -237,19 +287,28 @@ def _process_upload(path: Path, name: str, size: int, sha: str, force_ai=False) 
         if reason:
             fid = db.add_file(ename, status="skipped", parent_id=zid, reason=reason)
             db.log(fid, reason, "warn")
+            _prog_set(ename, step="skipped", reason=reason)
             items.append({"file_id": fid, "name": ename, "status": "skipped", "reason": reason,
                           "category": "zip" if reason.startswith(("nested zip", "corrupt zip")) else
                           ("other" if zipio.junk_reason(ename) else _cat_from_name(ename))})
             continue
         try:
-            items.append(process_one(tmp, ename, parent_id=zid, force_ai=force_ai))
+            _prog_set(ename, step="reading")
+            it = process_one(tmp, ename, parent_id=zid, force_ai=force_ai); _prog_done(it)
+            items.append(it)
         finally:
             tmp.unlink(missing_ok=True)
     done = sum(i["status"] == "done" for i in items)
     db.update_file(zid, status="done", method="zip", reason=f"{done}/{len(items)} entries extracted")
     return {"zip_id": zid, "items": items}
 
+def _prog_done(it):
+    st = it.get("status")
+    step = {"done": "saved", "cached": "saved", "classified": "classified", "skipped": "skipped", "queued_ai": "queued"}.get(st, "failed")
+    _prog_set(it.get("name"), step=step, reason=it.get("reason"), order_id=it.get("order_id"))
+
 def _bg_batch(bid, tmp, name, size, sha, force_ai, owner=None):
+    _tl.bid = bid; PROG_LAST[0] = bid; PROG.setdefault(bid, {"files": [], "started": __import__("time").time()})["name"] = name
     try:
         res = process_upload(tmp, name, size, sha, force_ai, owner)
         db.save_batch(bid, "done", name, res)
@@ -257,6 +316,9 @@ def _bg_batch(bid, tmp, name, size, sha, force_ai, owner=None):
         logging.exception("batch failed"); db.save_batch(bid, "failed", name, {"error": f"{e.__class__.__name__}: {e}"})
     finally:
         tmp.unlink(missing_ok=True)
+        import time as _t
+        for f in PROG.get(bid, {}).get("files", []):
+            if not f["t1"]: f.update(step="skipped", reason=f["reason"] or "not processed", t1=_t.time())
 
 async def _run_upload(file: UploadFile, force_ai: bool, wait: bool = True, owner=None):
     if not wait:
@@ -279,6 +341,10 @@ async def _run_upload(file: UploadFile, force_ai: bool, wait: bool = True, owner
 @app.post("/api/upload")
 async def upload(request: Request, file: UploadFile = File(...), wait: int = 1):
     return await _run_upload(file, False, bool(wait), getattr(request.state, "user", None))
+
+@app.get("/api/progress")
+def api_progress(bid: str = ""):
+    return progress(bid or PROG_LAST[0] or "") or {"active": False}
 
 @app.get("/api/batches/{bid}")
 def api_batch(bid: str, view: str = "upload"):

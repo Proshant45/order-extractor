@@ -330,3 +330,19 @@ def test_crud(client):
     assert client.delete(f"/api/orders/{oid}").status_code == 200
     assert client.get(f"/api/orders/{oid}").status_code == 404 and client.delete(f"/api/orders/{oid}").status_code == 404
     assert "needs review" not in client.get("/").text.lower()
+
+def test_list_qty_uses_line_qty_when_no_sizes(client):
+    oid = client.post("/api/orders", json={"buyer_name": "SC", "pos": [{"po_number": "SC-QTY", "lines": [{"color": "Navy", "sizes": {}, "order_qty": 1200, "rate": 2.5}]}]}).json()["id"]
+    row = client.get("/api/orders", params={"q": "SC-QTY"}).json()[0]
+    assert row["qty"] == 1200 and row["value"] == 3000
+    client.delete(f"/api/orders/{oid}")
+
+def test_progress_endpoint(client):
+    from app import main
+    main.PROG["tbid"] = {"name": "x.zip", "started": 0, "files": [
+        {"name": "a/PO.pdf", "step": "saved", "reason": None, "order_id": 1, "t0": 0, "t1": 100, "order_doc": True},
+        {"name": "a/PO2.pdf", "step": "queued", "reason": None, "order_id": None, "t0": None, "t1": None, "order_doc": True},
+        {"name": "a/tp.pdf", "step": "classified", "reason": None, "order_id": None, "t0": 0, "t1": 1, "order_doc": False}]}
+    p = client.get("/api/progress", params={"bid": "tbid"}).json()
+    assert p["active"] and p["order_docs"] == 2 and p["order_docs_done"] == 1 and p["eta_s"] == 100 and len(p["files"]) == 3
+    assert "prog()" in client.get("/").text

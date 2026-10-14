@@ -113,8 +113,8 @@ def list_orders(q: str | None = None):
     sql = """SELECT o.id,o.buyer_name,o.brand,o.style_number,o.factory,o.status,o.currency,o.created_at,o.updated_at,f.name file_name,
           (SELECT GROUP_CONCAT(po_number, ', ') FROM pos WHERE order_id=o.id) po_numbers,
           (SELECT COUNT(*) FROM pos WHERE order_id=o.id) n_pos,
-          (SELECT COALESCE(SUM((SELECT COALESCE(SUM(value),0) FROM json_each(l.sizes))),0) FROM po_lines l JOIN pos p ON p.id=l.po_id WHERE p.order_id=o.id) qty,
-          (SELECT SUM(COALESCE(l.net_value, l.rate*(SELECT SUM(value) FROM json_each(l.sizes)))) FROM po_lines l JOIN pos p ON p.id=l.po_id WHERE p.order_id=o.id) value
+          (SELECT COALESCE(SUM(COALESCE((SELECT SUM(value) FROM json_each(l.sizes)), l.order_qty, 0)),0) FROM po_lines l JOIN pos p ON p.id=l.po_id WHERE p.order_id=o.id) qty,
+          (SELECT SUM(COALESCE(l.net_value, l.rate*COALESCE((SELECT SUM(value) FROM json_each(l.sizes)), l.order_qty))) FROM po_lines l JOIN pos p ON p.id=l.po_id WHERE p.order_id=o.id) value
           FROM orders o LEFT JOIN files f ON f.id=o.file_id"""
     args = []
     if q:
