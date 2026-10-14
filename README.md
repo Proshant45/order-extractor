@@ -18,6 +18,10 @@ PDFs use up to four pages per chunk, split where a new PO starts when text heade
 
 Normal chunks use one read. Invalid output or failed checks triggers one repair read. Checks include size sums, quantity × rate, printed totals, PO coverage and recognised deterministic layouts. Whole-PO totals are checked again after merging. Completed reads are reused during file retries. `checked` means the available checks passed; it does not guarantee every source field is correct. Unresolved mismatches remain visible for review.
 
+Optional model reasoning is disabled for extraction when supported, keeping output capacity available for JSON. Empty, truncated or invalid JSON can use one verified free fallback; partial output is rejected and errors include the model's finish/token diagnostics. Supporting-document schema failures get one chunk re-read. For XLS/XLSX table layout failures, the app instead stores all nonempty native workbook rows with original row numbers and column letters, preserving blank positions and multiline cells. These editable source tables replace AI tables and carry a review warning.
+
+On deployment with OpenRouter enabled, old truncation failures with retained originals are scheduled for retry using their existing processing slots. Saved orders, unrelated failures and the completed tech pack remain intact.
+
 The upload page streams actual progress through SSE, with polling after reconnects. It shows requested pages, model, start/return times, failed reads, repairs and stored results. Counters track requests and files, not guessed model progress.
 
 ## System processing budget

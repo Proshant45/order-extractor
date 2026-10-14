@@ -100,6 +100,39 @@ def test_truncated_output_is_never_accepted(api):
         provider.read('prompt',text='document')
 
 
+def test_optional_thinking_cannot_consume_the_json_response(api,monkeypatch):
+    provider,requests,_=api
+    entry=model(FREE_TEXT);entry['supported_parameters'].append('reasoning');entry['reasoning']={'mandatory':False}
+    monkeypatch.setattr(provider,'catalog',lambda:{FREE_TEXT:entry})
+    factory=httpx.Client
+    def route(request):
+        requests.append(request)
+        body=json.loads(request.content)
+        disabled=body.get('reasoning',{}).get('enabled') is False
+        return httpx.Response(200,json={'model':FREE_TEXT,'usage':{'cost':0},'choices':[{'finish_reason':'stop' if disabled else 'length','message':{'content':'{"pos":[]}' if disabled else ''}}]})
+    monkeypatch.setattr(provider,'client',lambda:factory(transport=httpx.MockTransport(route)))
+    assert provider.read('prompt',text='document')=={'pos':[]}
+
+
+def test_truncated_read_retries_a_verified_free_model_without_saving_partial(api,monkeypatch):
+    provider,requests,responses=api
+    monkeypatch.setenv('OPENROUTER_FALLBACK_MODEL',FREE_VISION)
+    llm.CURRENT.file_id=db.add_file('output.txt')
+    responses.append(httpx.Response(200,json={'usage':{'cost':0,'completion_tokens':16384,'completion_tokens_details':{'reasoning_tokens':16380}},'choices':[{'finish_reason':'length','message':{'content':'{"pos":['}}]}))
+    assert provider.read('prompt',text='document')=={'pos':[]}
+    jobs=db.file_job_progress([llm.CURRENT.file_id])[llm.CURRENT.file_id]
+    assert jobs['done']==1 and jobs['failed']==1
+    assert 'reasoning_tokens=16380' in jobs['jobs'][0]['error']
+    assert llm.CURRENT.used_model==FREE_VISION
+
+
+def test_exhausted_guard_reports_underlying_reader_error():
+    from app import guard
+    def failed(extra):raise RuntimeError('OpenRouter truncated: finish=length')
+    with pytest.raises(RuntimeError,match='finish=length'):
+        guard.ai_extract_with_guard(failed,'source',lambda *a:None,max_repairs=1)
+
+
 def test_unavailable_primary_falls_back_only_to_verified_free_model(api,monkeypatch):
     provider,requests,responses=api
     monkeypatch.setenv('OPENROUTER_FALLBACK_MODEL',FREE_VISION)
@@ -158,3 +191,21 @@ def test_completed_free_fallback_reused_on_same_logical_read(api,monkeypatch):
     assert provider.read('prompt',text='document')=={'pos':[]}
     assert sum(r.url.path.endswith('/chat/completions') for r in requests)==2
     assert llm.CURRENT.used_model==FREE_VISION
+
+
+def test_deploy_retries_only_old_truncation_failures_and_reuses_budget(api,monkeypatch,tmp_path):
+    from app import main,documents
+    monkeypatch.setattr(config,'DATA_DIR',tmp_path)
+    source=tmp_path/'bom.xls';source.write_bytes(b'original retained file')
+    fid=db.add_file('bom.xls',kind='xls',status='failed',reason='RuntimeError: OpenRouter response truncated or incomplete; no partial result accepted')
+    documents.attach_source(fid,source,'original-hash')
+    job=db.start_api_read('p',FREE_TEXT,'text',None,file_id=fid)
+    db.finish_job(job['id'],job['lease_id'],error='truncated')
+    unrelated=db.add_file('bad.csv',status='failed',reason='validation: negative quantity')
+    missing=db.add_file('lost.xls',status='failed',reason='RuntimeError: OpenRouter response truncated or incomplete; no partial result accepted')
+    assert main._recover_openrouter_truncations()==1
+    assert db.get_file(fid)['status']=='queued_ai'
+    assert (tmp_path/'queue'/f'{fid}.xls').read_bytes()==source.read_bytes()
+    assert db.get_file(unrelated)['status']=='failed' and db.get_file(missing)['status']=='failed'
+    assert main._recover_openrouter_truncations()==0
+    assert db.processing_budget_status()['used']==1

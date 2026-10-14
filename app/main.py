@@ -75,6 +75,7 @@ def _startup():
     report=clear_existing_queue_once()
     if not report["already_ran"]: logging.info("One-time queue cleanup: %s",report)
     db.recover_extractions()
+    _recover_openrouter_truncations()
     _recover_batches()
     threading.Thread(target=_retry_loop, daemon=True).start()
 
@@ -515,6 +516,22 @@ def ai_info():
     return {"model_a": os.getenv("OPENCODE_MODEL", "opencode/big-pickle"), "model_b": os.getenv("OPENCODE_MODEL_B", "opencode/mimo-v2.6-flash-free"),
             "model_image": os.getenv("OPENCODE_VISION_MODEL", "opencode/mimo-v2.6-flash-free"),
             "queued_files": len(db.queued_files()), "cached": db.cached_count()}
+
+
+def _recover_openrouter_truncations():
+    if config.llm_provider()!='openrouter':return 0
+    with db.conn() as c:
+        files=[dict(r) for r in c.execute("SELECT * FROM files WHERE status='failed' AND (reason='RuntimeError: OpenRouter response truncated or incomplete; no partial result accepted' OR (reason='RuntimeError: AI reader failed on every attempt' AND EXISTS(SELECT 1 FROM extraction_logs l WHERE l.file_id=files.id AND l.message LIKE '%OpenRouter response truncated%')))")]
+    recovered=0
+    for file in files:
+        source=documents.source_for_file(file)
+        if source is None:continue
+        directory=config.DATA_DIR/'queue';directory.mkdir(exist_ok=True)
+        shutil.copyfile(source,directory/f"{file['id']}{Path(file['name']).suffix[:10]}")
+        db.update_file(file['id'],status='queued_ai',reason='Retrying retained input after OpenRouter output fix')
+        db.log(file['id'],'Retained source scheduled for retry; existing processing slot preserved')
+        recovered+=1
+    return recovered
 
 @app.get("/api/processing-limit")
 def processing_limit():

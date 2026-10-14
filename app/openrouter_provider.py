@@ -16,6 +16,10 @@ _catalog_lock=threading.Lock()
 _cooldown_until=0
 
 
+class IncompleteOutput(RuntimeError):
+    pass
+
+
 def client():
     return httpx.Client(timeout=httpx.Timeout(config.LLM_TIMEOUT_S,connect=15))
 
@@ -101,6 +105,8 @@ def read(prompt,*,text=None,images=(),model=None,_fallback=False):
           'provider':{'max_price':{'prompt':0,'completion':0},'sort':'latency'}}
     params=entry.get('supported_parameters') or []
     if 'temperature' in params:body['temperature']=0
+    if 'reasoning' in params and not entry.get('reasoning',{}).get('mandatory',False):
+        body['reasoning']={'enabled':False}
     if 'response_format' in params:body['response_format']={'type':'json_object'}
     job=db.start_api_read(prompt,mid,text,packed,file_id=fid,page=getattr(llm.CURRENT,'page',None),
                           vote=getattr(llm.CURRENT,'vote','A'),owner=getattr(llm.CURRENT,'owner',None))
@@ -133,13 +139,16 @@ def read(prompt,*,text=None,images=(),model=None,_fallback=False):
         cost=payload.get('usage',{}).get('cost')
         if cost is not None and float(cost)!=0:raise RuntimeError('OpenRouter reported nonzero cost; free-only request rejected')
         choices=payload.get('choices') or []
-        if not choices:raise RuntimeError('OpenRouter returned no completion')
+        if not choices:raise IncompleteOutput('OpenRouter returned no completion')
         choice=choices[0]
         if choice.get('finish_reason') not in ('stop','end_turn'):
-            raise RuntimeError('OpenRouter response truncated or incomplete; no partial result accepted')
+            usage=payload.get('usage') or {}
+            reasoning=(usage.get('completion_tokens_details') or {}).get('reasoning_tokens','unknown')
+            raise IncompleteOutput(f"OpenRouter response truncated or incomplete: finish={choice.get('finish_reason')}, completion_tokens={usage.get('completion_tokens','unknown')}, reasoning_tokens={reasoning}; no partial result accepted")
         result=choice.get('message',{}).get('content') or ''
-        if not isinstance(result,str) or not result.strip():raise RuntimeError('OpenRouter returned no usable text')
-        data=llm._json(result)
+        if not isinstance(result,str) or not result.strip():raise IncompleteOutput('OpenRouter returned no usable text')
+        try:data=llm._json(result)
+        except ValueError:raise IncompleteOutput('OpenRouter returned invalid JSON; no partial result accepted') from None
         db.update_job_progress(job['id'],job['lease_id'],'output_received')
         ack=db.finish_job(job['id'],job['lease_id'],result=result)
         if ack!='ok':
@@ -147,6 +156,14 @@ def read(prompt,*,text=None,images=(),model=None,_fallback=False):
             _defer('OpenRouter result was not persisted; input retained for retry',60)
         llm.CURRENT.used_model=mid
         return data
+    except IncompleteOutput as e:
+        error=str(e)
+        ack=db.finish_job(job['id'],job['lease_id'],error=error)
+        if ack=='stale_lease':db.cancel_job(job['id'])
+        if not _fallback and fallback!=mid:
+            try:return read(prompt,text=text,images=images,model=fallback,_fallback=True)
+            except ValueError:pass
+        raise
     except httpx.TransportError:
         error='OpenRouter network/timeout error; retained for retry'
         _defer(error,60)

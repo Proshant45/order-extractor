@@ -35,3 +35,15 @@ The final regression suite passed **104 tests**. Python compilation, JavaScript/
 These probes are synthetic, not an accuracy benchmark of the entire GEAL ZIP. Passing arithmetic checks cannot prove every source field correct. Real free-model latency varies, and the fallback model may also be busy. Persistent storage is required for restart recovery.
 
 Verification level: unit-tested and real external API extraction/CRUD tested in an isolated app. The new OpenRouter deployment on Render remains unverified until the user adds `OPENROUTER_API_KEY` and deploys.
+
+## Follow-up: actual failed GEAL files
+
+Read-only Render logs confirmed both the ALDI AMD-02 spreadsheet and BESTSELLER BOM failed on incomplete replies. The ALDI tech pack had already stored 81 fields, 6 tables and 15 table rows; its `classified` database status did not mean classification without extracted data.
+
+A bounded request using the actual ALDI text returned `finish_reason=length`, empty content and 1,576 reasoning tokens within a 2,048-token output allowance. The model catalog advertised optional reasoning. Disabling it produced complete zero-cost replies with zero reasoning tokens on the actual BOM and ALDI sources. OpenRouter documents that reasoning shares the output budget in its [reasoning guidance](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens).
+
+The complete BOM response exposed a separate AI column-alignment error. The app now preserves the original workbook cells directly when spreadsheet table validation fails, including native numeric values, original row numbers, embedded tabs/newlines and blank positions. The actual BOM was stored and read back with 12 fields and 93 nonempty native source rows. Cached completed responses were reused during follow-up checks.
+
+The actual ALDI contract produced a stored draft after two complete zero-cost reads. Read-back totals were 672,389 pieces and 2,290,543.968 value, matching the printed totals. It remains `needs_review` because pack/unit rates and repeated-PO date/total conflicts are flagged; matching document totals are not presented as proof of full accuracy.
+
+These write/read checks used an isolated temporary database. Startup recovery is regression-tested to schedule only the old truncation failures with retained inputs and preserve their existing budget slots. Production retry results after this follow-up deployment have not yet been verified.

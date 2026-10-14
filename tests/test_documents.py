@@ -119,3 +119,50 @@ def test_invalid_document_edit_cannot_overwrite_saved_data(documents_client):
     bad={**valid,'tables':[{'name':'Materials','columns':['Fabric'],'rows':[['Cotton',1.5]]}]}
     assert c.put(f'/api/files/{fid}/data',json=bad).status_code==422
     assert c.get(f'/api/files/{fid}/data').json()['metadata']['document']==valid
+
+
+@pytest.mark.parametrize('columns',[['Fabric','Usage'],2,'Fabric',{'Fabric':1}])
+def test_malformed_ai_table_is_re_read_before_any_document_is_saved(documents_client,monkeypatch,columns):
+    from app import llm
+    monkeypatch.setattr(config,'llm_provider',lambda:'openrouter')
+    responses=iter([
+        {'document_type':'bom','fields':[],'tables':[{'name':'Materials','columns':columns,'rows':[['Cotton',1.5,'shifted']]}]},
+        {'document_type':'bom','fields':[],'tables':[{'name':'Materials','columns':['Fabric','Usage'],'rows':[['Cotton',1.5],['Linen',2.5]]}]},
+    ])
+    monkeypatch.setattr(llm,'read_page',lambda **kwargs:next(responses))
+    item=documents_client.post('/api/upload',files={'file':('bom.txt',b'BILL OF MATERIAL\nCotton 1.5\nLinen 2.5')}).json()['items'][0]
+    assert item['status']=='classified',item
+    data=documents_client.get(f"/api/files/{item['file_id']}/data").json()['metadata']['document']
+    assert data['tables'][0]['rows']==[['Cotton',1.5],['Linen',2.5]]
+    assert any('re-read' in entry['message'] for entry in db.file_logs(item['file_id']))
+
+
+@pytest.mark.parametrize('long_cell,late_fallback',[('Cotton\norganic',False),('Cotton\norganic'+'x'*2000,False),('Cotton\norganic'+'x'*2000,True)])
+def test_spreadsheet_bom_keeps_source_cells_when_ai_table_columns_shift(documents_client,monkeypatch,tmp_path,long_cell,late_fallback):
+    import openpyxl
+    from app import llm
+    monkeypatch.setattr(config,'llm_provider',lambda:'openrouter')
+    monkeypatch.setattr(config,'AI_CHUNK_MAX_CHARS',1000)
+    book=openpyxl.Workbook();sheet=book.active;sheet.title='Materials'
+    sheet.append(['BILL OF MATERIAL','Style','SHIRT-1'])
+    sheet.append(['Item','Colour','Consumption']);sheet.append(['Cotton',None,1.5]);sheet.append(['Linen','Blue',2.5])
+    sheet.append([long_cell,None,1.5]);sheet.append(['Trim\tbutton','Blue',2.5])
+    path=tmp_path/'bom.xlsx';book.save(path)
+    reads=[]
+    def malformed(**kwargs):
+        reads.append(kwargs)
+        if late_fallback and len(reads)==1:
+            return {'document_type':'bom','fields':[{'name':'Style','value':'SHIRT-1'}],
+                    'tables':[{'name':'Materials','columns':['Item','Colour','Consumption'],'rows':[['Cotton',None,1.5]]}]}
+        return {'document_type':'bom','fields':[{'name':'Style','value':'SHIRT-1'}],
+                'tables':[{'name':'Materials','columns':['Item','Colour','Consumption'],'rows':[['Cotton',1.5],['Linen','Blue',2.5]]}]}
+    monkeypatch.setattr(llm,'read_page',malformed)
+    item=documents_client.post('/api/upload',files={'file':('bom.xlsx',path.read_bytes())}).json()['items'][0]
+    assert item['status']=='classified',item
+    document=documents_client.get(f"/api/files/{item['file_id']}/data").json()['metadata']['document']
+    assert any([3,'Cotton',None,1.5] in table['rows'] for table in document['tables'])
+    assert any([4,'Linen','Blue',2.5] in table['rows'] for table in document['tables'])
+    assert any([5,long_cell,None,1.5] in table['rows'] for table in document['tables'])
+    assert any([6,'Trim\tbutton','Blue',2.5] in table['rows'] for table in document['tables'])
+    assert len(document['tables'])==1
+    assert any('source cells' in warning for warning in document['warnings'])

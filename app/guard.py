@@ -123,5 +123,5 @@ def ai_extract_with_guard(read, text: str | None, log, max_repairs: int = 2, det
         extra = ("\nYour previous answer failed these checks. Re-read the document carefully and fix them. "
                  "Do not invent numbers; every quantity must appear in the document:\n- " + "\n- ".join(errs[:25]))
     if best is None:
-        raise RuntimeError("AI reader failed on every attempt")
+        raise RuntimeError("AI reader failed on every attempt: " + "; ".join(errs[:3]))
     return best, best_err, max_repairs + 1
