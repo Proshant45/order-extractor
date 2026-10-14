@@ -4,6 +4,7 @@ from pathlib import Path
 DATA_DIR = Path(os.getenv("DATA_DIR", Path(__file__).resolve().parent.parent / "data"))
 DB_PATH = Path(os.getenv("DB_PATH", DATA_DIR / "orders.db"))
 TMP_DIR = Path(os.getenv("TMP_DIR", DATA_DIR / "tmp"))
+MAX_PROCESSING_FILES = 20
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "25"))          # per single (non-zip) file
 MAX_ZIP_MB = int(os.getenv("MAX_ZIP_MB", "100"))                # whole zip upload, streamed to disk
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024

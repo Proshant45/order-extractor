@@ -266,6 +266,31 @@ def test_progress_reports_real_worker_stage_and_counts(client):
     db.cancel_job(jid)
 
 
+def test_progress_separates_unprepared_files_and_cancelled_reads(client):
+    fid=db.add_file('timeout.txt', status='queued_ai', reason='AI job timed out after 900s')
+    jid=db.enqueue_job('p','m','text',None,file_id=fid)
+    db.cancel_job(jid)
+    queued_fid=db.add_file('queued.txt')
+    db.enqueue_job('p','m','text',None,file_id=queued_fid)
+    def entry(name, file_id=None, step='queued'):
+        return dict(name=name,file_id=file_id,step=step,reason=None,order_id=None,t0=None,t1=None,order_doc=True)
+    main.PROG['honest-progress']={'name':'input.zip','started':time.time(),'files':[
+        entry('timeout.txt',fid),entry('queued.txt',queued_fid),*[entry(f'pending-{i}.txt') for i in range(45)]]}
+    p=main.progress('honest-progress')
+    assert p['files'][0]['worker_stage']=='retry_pending'
+    assert p['files'][2]['worker_stage']=='pending'
+    assert p['reads_failed']==1 and p['reads_done']==0 and p['reads_total']==2
+    assert p['reads_queued']==1 and p['files_pending']==45 and p['files_retrying']==1
+    assert p['files'][0]['reads']['jobs'][0]['stage']=='cancelled'
+
+
+def test_cancelled_batch_never_shows_active_processing(client):
+    db.save_batch('cancelled-progress','cancelled','input.zip',{'error':'Queue cleared once'})
+    p=main.progress('cancelled-progress')
+    assert p is not None and not p['active']
+    assert p['batch_status']=='cancelled' and p['error']=='Queue cleared once'
+
+
 def test_empty_worker_response_has_no_body():
     db.init()
     response=main.worker_next(owner='wrong-account')

@@ -3,7 +3,8 @@
 <div id="aiw" class="pill {{ 'done' if ws.online else 'failed' }}">AI worker {{ 'online' if ws.online else 'offline' }}{% if ws.last_seen_s is not none %} · seen {{ws.last_seen_s}}s ago{% endif %} · queue {{ws.queued}}</div></header>
 <section class="card"><h3>Auto Extract from document</h3>
 <form id="up" class="drop"><input type="file" name="file" id="f" accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.xlsx,.csv,.docx,.zip">
-<button class="btn dark" type="submit">Upload &amp; Extract</button><span class="hint">One file at a time (or a .zip). PDF, image, XLSX, CSV, DOCX. Max {{max_mb}} MB.</span></form>
+<button class="btn dark" type="submit">Upload &amp; Extract</button><span class="hint">One file at a time (or a .zip). PDF, image, XLSX, CSV, DOCX. Max {{max_mb}} MB per file.</span></form>
+<p id="file-budget" class="hint">System processing limit: {{file_limit.limit}} files total · {{file_limit.used}} used · {{file_limit.remaining}} remaining.</p>
 <div id="res"></div><div id="prog"></div></section>
 <section class="card"><div class="listhead"><h3>Orders</h3>
 <form method="get" action="/" class="search"><input name="q" value="{{ q }}" placeholder="Search buyer, PO, style, file…"><button class="btn ghost sm">Search</button>{% if q %} <a href="/" class="btn ghost sm">Clear</a>{% endif %}</form>
@@ -14,8 +15,12 @@
 <td>{{ o.file_name or 'manual' }}</td><td>{{ (o.updated_at or o.created_at or '')[:16]|replace('T',' ') }}</td>
 <td><span class="pill {{o.status}}">{{o.status}}</span></td><td class="act"><a class="btn blue sm" href="/orders/{{o.id}}">Edit</a> <button class="btn ghost sm" onclick="delOrder({{o.id}},this)">Delete</button></td></tr>
 {% else %}<tr><td colspan="10" class="muted">{% if q %}No orders match “{{q}}”.{% else %}No orders yet. Upload a document above or create a New Order.{% endif %}</td></tr>{% endfor %}</tbody></table></section>
-<section class="card"><h3>Recent files</h3><table class="grid"><thead><tr><th>#</th><th>File</th><th>Type</th><th>Status</th><th>Doc type</th><th>Method / reason</th></tr></thead><tbody>
-{% for f in files %}<tr><td>{{f.id}}</td><td>{% if f.parent_id %}↳ {% endif %}{{f.name}}</td><td>{{f.kind or ''}}</td><td><span class="pill {{f.status}}">{{f.status}}</span></td><td>{{f.doc_type or ''}}</td><td>{{f.method or ''}} {{f.reason or ''}}{% if f.order_id %} <a href="/orders/{{f.order_id}}">order {{f.order_id}}</a>{% endif %}</td></tr>{% endfor %}</tbody></table></section>
+<section class="card document-library"><div class="listhead"><h3>Documents</h3><span class="muted">Recent {{files|length}} documents · repeated copies grouped</span></div>
+<table class="grid documents-table" id="documents-table"><thead><tr><th>Document</th><th>Type</th><th>Result</th><th>Actions</th></tr></thead><tbody>
+{% for f in files %}<tr><td class="document-name"><a href="/files/{{f.id}}" title="{{f.name}}">{{f.display_name}}</a>{% if f.folder %}<small>{{f.folder}}</small>{% endif %}</td>
+<td>{{f.type_label}}<small class="muted format-label">{{(f.kind or 'file')|upper}}</small></td><td><span class="pill {{f.status}}">{{f.label}}</span><small class="outcome-detail">{% if f.status in ['failed','skipped','cancelled'] %}{{f.reason or f.explanation}}{% elif f.status=='cached' %}{{'Existing order available' if f.order_id else 'Available to inspect'}}{% elif f.status=='classified' %}No order created{% elif f.status=='queued_ai' %}No final result yet{% endif %}</small></td>
+<td class="document-actions"><a class="btn ghost sm" href="/files/{{f.id}}">View document</a>{% if f.source_available %}<a class="btn ghost sm" href="/api/files/{{f.id}}/source?download=1">Download</a>{% endif %}{% if f.order_id %}<a class="btn blue sm" href="/orders/{{f.order_id}}">Open order</a>{% endif %}</td></tr>
+{% else %}<tr><td colspan="4" class="muted">No documents uploaded yet.</td></tr>{% endfor %}</tbody></table></section>
 <section class="card" id="status"><h3>AI reader status</h3>
 <table class="grid kv"><tr><td>AI reader</td><td>opencode on the local worker box (pulls jobs from this app over HTTPS)</td></tr>
 <tr><td>Read A (text)</td><td>{{ ai.model_a }}</td></tr><tr><td>Read B (text)</td><td>{{ ai.model_b }}</td></tr><tr><td>Images / scans (A and B)</td><td>{{ ai.model_image }}</td></tr>

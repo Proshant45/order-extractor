@@ -1,4 +1,5 @@
 import json, os, sqlite3, threading
+from pathlib import Path
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from . import config
@@ -20,6 +21,7 @@ CREATE TABLE IF NOT EXISTS ai_jobs(id INTEGER PRIMARY KEY, status TEXT NOT NULL,
 CREATE INDEX IF NOT EXISTS ai_jobs_status ON ai_jobs(status, id);
 CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT);
 CREATE TABLE IF NOT EXISTS batches(id TEXT PRIMARY KEY, status TEXT, name TEXT, result TEXT, created_at TEXT, updated_at TEXT);
+CREATE TABLE IF NOT EXISTS file_budget(file_id INTEGER PRIMARY KEY, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS extraction_logs(id INTEGER PRIMARY KEY, file_id INTEGER REFERENCES files(id), level TEXT, message TEXT, created_at TEXT);
 """
 _lock = threading.Lock()
@@ -59,9 +61,15 @@ def init():
             if name not in jcols: c.execute(f"ALTER TABLE ai_jobs ADD COLUMN {name} {declaration}")
         c.execute("CREATE INDEX IF NOT EXISTS ai_jobs_file ON ai_jobs(file_id,id)")
         fcols = {r[1] for r in c.execute("PRAGMA table_info(files)")}
+        if "source_path" not in fcols: c.execute("ALTER TABLE files ADD COLUMN source_path TEXT")
+        if "budget_file_id" not in fcols: c.execute("ALTER TABLE files ADD COLUMN budget_file_id INTEGER")
         if "doc_type" not in fcols:
             c.execute("ALTER TABLE files ADD COLUMN doc_type TEXT")
             c.execute("ALTER TABLE files ADD COLUMN meta TEXT")
+        if not c.execute("SELECT 1 FROM kv WHERE k='file_budget_initialized'").fetchone():
+            c.execute("INSERT OR IGNORE INTO file_budget(file_id,created_at) SELECT f.id,f.created_at FROM files f WHERE (f.method LIKE '%ai%' AND f.method NOT LIKE 'cache:%') OR EXISTS(SELECT 1 FROM ai_jobs j WHERE j.file_id=f.id AND j.attempts>0)")
+            c.execute("UPDATE files SET budget_file_id=id WHERE id IN (SELECT file_id FROM file_budget)")
+            c.execute("INSERT INTO kv(k,v) VALUES('file_budget_initialized','1')")
         if "review_status" not in cols:
             c.execute("ALTER TABLE orders ADD COLUMN review_status TEXT")
             c.execute("ALTER TABLE orders ADD COLUMN review_json TEXT")
@@ -72,6 +80,11 @@ def set_review(oid, status, review):
 
 def add_file(name, kind=None, size=None, sha=None, status="processing", parent_id=None, reason=None):
     with conn() as c:
+        if parent_id is not None and status in ('processing','cached','skipped'):
+            row=c.execute("SELECT id FROM files WHERE parent_id=? AND name=? AND status='pending' ORDER BY id DESC LIMIT 1",(parent_id,name)).fetchone()
+            if row:
+                c.execute('UPDATE files SET kind=COALESCE(?,kind),size=COALESCE(?,size),sha256=COALESCE(?,sha256),status=?,reason=? WHERE id=?',(kind,size,sha,status,reason,row['id']))
+                return row['id']
         return c.execute("INSERT INTO files(parent_id,name,kind,size,sha256,status,reason,created_at) VALUES(?,?,?,?,?,?,?,?)",
                          (parent_id, name, kind, size, sha, status, reason, now())).lastrowid
 
@@ -148,9 +161,21 @@ def delete_order(oid) -> bool:
         c.execute("DELETE FROM pos WHERE order_id=?", (oid,))
         return c.execute("DELETE FROM orders WHERE id=?", (oid,)).rowcount == 1
 
+FILE_ORDER_SQL = "COALESCE((SELECT id FROM orders WHERE file_id=f.id), (SELECT o.id FROM orders o JOIN files original ON original.id=o.file_id WHERE original.sha256=f.sha256 ORDER BY o.id DESC LIMIT 1))"
+
+
 def list_files(limit=50):
     with conn() as c:
-        return [dict(r) for r in c.execute("""SELECT f.*, (SELECT id FROM orders WHERE file_id=f.id) order_id FROM files f ORDER BY f.id DESC LIMIT ?""", (limit,))]
+        rows=[dict(r) for r in c.execute(f"SELECT f.*, {FILE_ORDER_SQL} order_id FROM files f ORDER BY f.id DESC LIMIT ?", (limit,))]
+    for row in rows:
+        row["source_available"] = bool(row.get("source_path") and Path(row["source_path"]).is_file())
+    return rows
+
+
+def get_file(fid):
+    with conn() as c:
+        row=c.execute(f"SELECT f.*, {FILE_ORDER_SQL} order_id FROM files f WHERE f.id=?", (fid,)).fetchone()
+        return dict(row) if row else None
 
 def file_logs(fid):
     with conn() as c:
@@ -163,6 +188,8 @@ MAX_JOB_ATTEMPTS = 3
 
 def enqueue_job(prompt, model, text, image, owner=None, *, file_id=None, page=None, vote=None):
     with conn() as c:
+        c.execute("BEGIN IMMEDIATE")
+        _reserve_file_budget(c, file_id)
         return c.execute("INSERT INTO ai_jobs(status,prompt,model,text,image,owner,created_at,updated_at,file_id,page,vote,stage) VALUES('queued',?,?,?,?,?,?,?,?,?,?, 'queued')",
                          (prompt, model, text, image, owner, now(), now(), file_id, page, vote)).lastrowid
 
@@ -195,10 +222,14 @@ def claim_job(worker, owner=None):
         c.execute("BEGIN IMMEDIATE")
         c.execute("UPDATE ai_jobs SET status=CASE WHEN attempts>=? THEN 'error' ELSE 'queued' END, error=CASE WHEN attempts>=? THEN 'lease expired too often' ELSE error END "
                   "WHERE status='leased' AND lease_until<?", (MAX_JOB_ATTEMPTS, MAX_JOB_ATTEMPTS, t))
-        r = c.execute("SELECT id,prompt,model,text,image,file_id,page,vote FROM ai_jobs WHERE status='queued' AND (? IS NULL OR owner=?) ORDER BY id LIMIT 1",
-                      (owner, owner)).fetchone()
-        if not r:
-            return None
+        while True:
+            r = c.execute("SELECT id,prompt,model,text,image,file_id,page,vote FROM ai_jobs WHERE status='queued' AND (? IS NULL OR owner=?) ORDER BY id LIMIT 1", (owner, owner)).fetchone()
+            if not r: return None
+            try: _reserve_file_budget(c, r["file_id"])
+            except ProcessingLimit as e:
+                c.execute("UPDATE ai_jobs SET status='error',stage='failed',error=?,updated_at=? WHERE id=?", (str(e),now(),r["id"]))
+                continue
+            break
         lease = _secrets.token_hex(12)
         c.execute("UPDATE ai_jobs SET status='leased', stage='received', received_at=?, started_at=NULL, output_at=NULL, returned_at=NULL, lease_id=?, lease_until=?, attempts=attempts+1, worker=?, updated_at=? WHERE id=?",
                   (now(), lease, t + LEASE_S, worker, now(), r["id"]))
@@ -304,6 +335,8 @@ def file_job_progress(file_ids):
         rows = [dict(r) for r in c.execute(f"SELECT id,file_id,page,vote,model,status,stage,worker,attempts,updated_at,error,received_at,started_at,output_at,returned_at FROM ai_jobs WHERE file_id IN ({','.join('?' for _ in file_ids)}) ORDER BY id", file_ids)]
     out = {}
     for r in rows:
+        if r['status'] in ('cancelled', 'error'):
+            r['stage'] = 'cancelled' if r['status'] == 'cancelled' else 'failed'
         x = out.setdefault(r["file_id"], {"total":0,"done":0,"failed":0,"jobs":[]})
         x["total"] += 1; x["done"] += r["status"] == "done"; x["failed"] += r["status"] in ("error", "cancelled")
         x["jobs"].append(r)
@@ -323,3 +356,44 @@ def order_options():
         options['destination'].update(row[0] for row in c.execute("SELECT DISTINCT destination FROM pos WHERE destination IS NOT NULL AND destination<>''"))
         options['colors'].update(row[0] for row in c.execute("SELECT DISTINCT color FROM po_lines WHERE color<>''"))
     return {field: sorted(values, key=str.casefold) for field, values in options.items()}
+
+
+class ProcessingLimit(RuntimeError):
+    pass
+
+
+def _reserve_file_budget(c, fid):
+    if fid is None: return
+    row = c.execute("SELECT budget_file_id FROM files WHERE id=?", (fid,)).fetchone()
+    if not row: raise ValueError("AI processing requires a recorded source file")
+    root = row["budget_file_id"] or fid
+    if c.execute("SELECT 1 FROM file_budget WHERE file_id=?", (root,)).fetchone(): return
+    used = c.execute("SELECT COUNT(*) FROM file_budget").fetchone()[0]
+    if used >= config.MAX_PROCESSING_FILES:
+        raise ProcessingLimit(f"System processing limit reached: {config.MAX_PROCESSING_FILES} files total. No further file sent to AI.")
+    c.execute("INSERT INTO file_budget(file_id,created_at) VALUES(?,?)", (root,now()))
+    c.execute("UPDATE files SET budget_file_id=? WHERE id=?", (root,fid))
+
+
+def reserve_file_budget(fid):
+    with conn() as c:
+        c.execute("BEGIN IMMEDIATE")
+        _reserve_file_budget(c,fid)
+
+
+def copy_file_budget(old_fid,new_fid):
+    with conn() as c:
+        row = c.execute("SELECT budget_file_id FROM files WHERE id=?", (old_fid,)).fetchone()
+        if row and row["budget_file_id"]:
+            c.execute("UPDATE files SET budget_file_id=? WHERE id=?", (row["budget_file_id"],new_fid))
+
+
+def recover_file_budget(fid,sha,name):
+    with conn() as c:
+        row = c.execute("SELECT budget_file_id FROM files WHERE sha256=? AND name=? AND id<>? AND budget_file_id IS NOT NULL AND (status='queued_ai' OR reason LIKE 'server restarted%') ORDER BY id DESC LIMIT 1", (sha,name,fid)).fetchone()
+        if row: c.execute("UPDATE files SET budget_file_id=? WHERE id=?", (row["budget_file_id"],fid))
+
+
+def processing_budget_status():
+    with conn() as c: used = c.execute("SELECT COUNT(*) FROM file_budget").fetchone()[0]
+    return {"limit":config.MAX_PROCESSING_FILES,"used":used,"remaining":max(0,config.MAX_PROCESSING_FILES-used)}

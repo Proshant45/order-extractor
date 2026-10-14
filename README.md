@@ -58,3 +58,17 @@ The upload screen streams progress with SSE from `/api/batches/{id}/events` and 
 Both synchronous and background uploads retain their input and batch metadata under persistent `DATA_DIR`. Interrupted batches replay after server restart; identical completed entries use cache. Worker results remain in an ignored local outbox until the server returns a recognised acknowledgement. Edited/deleted orders invalidate their source cache. Manual changes clear the original AI agreement badge.
 
 Use `.venv/bin/python scripts/check_local_extraction.py /path/to/document` for real HTTP/worker extraction with retained reports. The checked PO fixture is restored from the supplied ZIP and remains ignored. See [assignment verification](docs/assignment-verification.md) for measured results and limits. No universal accuracy or production crash guarantee is implied by a passing local sample.
+
+## System processing budget
+
+The entire app has a hard budget of 20 files sent to AI, shared by single-file and ZIP uploads. Each document entering AI consumes one persistent slot; independent reads, repairs and crash retries share that slot. Cached results and documents classified without AI consume no new slot. Once 20 slots are used, further files are reported as skipped with the processing-limit reason and no AI job is sent. Finished or deleted orders do not replenish the budget. Existing AI-processed files count when the limit is introduced. The upload page shows used/remaining counts; `GET /api/processing-limit` reports the persisted budget.
+
+## Documents and stored data
+
+The document list shows every distinct uploaded file, including ZIP entries that have not been extracted. Repeated identical uploads with the same filename share a list entry; their individual records remain accessible by file ID. Open a document to see its current saved order header, POs, colour/size quantities, dates, rates, values and warnings, then use the existing order form to edit/save. Supporting documents show their stored references and original contents. Unfinished and failed files explicitly show that no extracted order is stored. Originals can be viewed/downloaded; cached duplicates link to the existing order. `GET /api/files/{id}/data` returns current saved data and original extraction separately.
+
+ZIP entries are registered and originals retained before AI processing, within the existing ZIP size/security guards. Spreadsheet previews show up to 100 rows and 40 columns per sheet; download the original for the complete sheet. Original documents stored before this change are restored from retained batch inputs when available; missing originals are reported explicitly. Progress separates actual queued AI reads, unprepared files, retries and failed/cancelled reads.
+
+## One-time queue cleanup
+
+On the first startup with this update, `app.maintenance.clear_existing_queue_once()` cancels existing queued/leased AI jobs, unfinished file extractions and processing batches, preserves saved orders and available original documents, and starts a fresh 20-file allowance. A marker in the same persistent database prevents this cleanup/reset from running again on later deployments. Run `python scripts/clear_existing_queue_once.py` manually against the app's environment to invoke the same guarded operation. Completed batch results waiting for AI are reconciled to cancelled; future uploads are unaffected by repeat invocations.

@@ -2,14 +2,14 @@ from __future__ import annotations
 import asyncio, hashlib, json, logging, os, re, tempfile, zipfile
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, Response, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 from pydantic import ValidationError
 from fastapi import Form
 from fastapi.responses import RedirectResponse
-from . import auth, config, db, extract, llm, zipio
+from . import auth, config, db, extract, llm, zipio, documents
 import shutil, threading, secrets as _sec
 from .schema import Order, warnings_for
 
@@ -71,6 +71,9 @@ def _startup():
     db.init()
     for p in config.TMP_DIR.glob("*"):   # stale temp files from a crash
         if p.is_file(): p.unlink(missing_ok=True)
+    from .maintenance import clear_existing_queue_once
+    report=clear_existing_queue_once()
+    if not report["already_ran"]: logging.info("One-time queue cleanup: %s",report)
     db.recover_extractions()
     _recover_batches()
     threading.Thread(target=_retry_loop, daemon=True).start()
@@ -115,6 +118,7 @@ def process_one(path: Path, name: str, parent_id=None, size=None, sha=None, forc
     if hit:   # identical bytes already extracted: serve stored result, no AI job
         fid = db.add_file(name, kind=hit["kind"], size=size or path.stat().st_size, sha=sha, parent_id=parent_id, status="cached",
                           reason=f"identical to file {hit['file_id']}")
+        documents.attach_source(fid,path,sha)
         db.update_file(fid, method="cache:" + (hit["method"] or ""), doc_type=hit["doc_type"], meta=hit["meta"])
         db.log(fid, f"cache hit (sha256 {sha[:12]}): served result of file {hit['file_id']}")
         cat = {"pdf": "pdf_text", "unknown": "other", "xls": "other", "eml": "other", "text": "other"}.get(hit["kind"], hit["kind"] or "other")
@@ -125,6 +129,8 @@ def process_one(path: Path, name: str, parent_id=None, size=None, sha=None, forc
             out["meta"] = json.loads(hit["meta"])
         return out
     fid = db.add_file(name, size=size or path.stat().st_size, sha=sha, parent_id=parent_id)
+    documents.attach_source(fid,path,sha)
+    db.recover_file_budget(fid,sha,name)
     if on_file: on_file(fid)
     llm.CURRENT.file_id = fid
     _prog_set(name, file_id=fid)
@@ -169,6 +175,9 @@ def process_one(path: Path, name: str, parent_id=None, size=None, sha=None, forc
         shutil.copyfile(path, qdir / f"{fid}{Path(name).suffix[:10]}")
         lg(f"queued for AI retry: {e}", "warn"); db.update_file(fid, status="queued_ai", reason=str(e))
         return {"file_id": fid, "name": name, "status": "queued_ai", "reason": str(e), "category": ctx["category"]}
+    except db.ProcessingLimit as e:
+        reason = str(e); lg(reason,"warn"); db.update_file(fid,status="skipped",reason=reason)
+        return {"file_id":fid,"name":name,"status":"skipped","reason":reason,"category":ctx["category"]}
     except extract.Skip as s:
         lg(str(s), "warn"); db.update_file(fid, status="skipped", reason=str(s))
         return {"file_id": fid, "name": name, "status": "skipped", "reason": str(s), "need_ai": s.need_ai, "category": ctx["category"]}
@@ -255,8 +264,13 @@ def progress(bid):
     P = PROG.get(bid)
     persisted = db.get_batch(bid)
     if not P:
-        batch = db.get_batch(bid)
-        if not batch or not batch.get("result") or "items" not in batch["result"]: return None
+        batch = persisted
+        if not batch: return None
+        if not batch.get('result') or 'items' not in batch['result']:
+            if batch['status'] not in ('failed', 'cancelled'): return None
+            return {'batch_id':bid,'name':batch['name'],'batch_status':batch['status'],
+                    'active':False,'phase':batch['status'],'files':[],'total':0,'finished':0,
+                    'error':(batch.get('result') or {}).get('error')}
         files = []
         for item in batch["result"]["items"]:
             stage = {"done":"saved","classified":"classified","skipped":"skipped","queued_ai":"queued"}.get(item["status"],"failed")
@@ -277,14 +291,20 @@ def progress(bid):
         if f["step"] == "saved": stage = "saved"
         elif f["step"] in ("failed","skipped","classified"): stage = f["step"]
         elif active: stage = active[-1].get("stage") or "received"
-        elif reads["total"] and reads["done"] + reads["failed"] == reads["total"]: stage = "validating"
-        elif reads["total"]: stage = "queued"
-        else: stage = "preparing" if f["step"] == "reading" else "queued"
+        elif any(j['status']=='queued' for j in reads['jobs']): stage = 'queued'
+        elif reads["failed"]: stage = 'retry_pending' if f['step']=='queued' else 'read_failed'
+        elif reads["total"] and reads["done"] == reads["total"]: stage = "validating"
+        else: stage = "preparing" if f["step"] == "reading" else "pending"
         output_files.append({**{k:f[k] for k in ("name","step","reason","order_id")}, "worker_stage":stage,"reads":reads})
     return {"batch_id": bid, "name": P.get("name"), "total": len(fs), "finished": len(fin),
             "order_docs": len(docs), "order_docs_done": sum(1 for f in docs if f["t1"]),
             "avg_s_per_doc": round(avg), "eta_s": max(0, round(eta)) if remaining_docs else 0,
-            "active": len(fin) < len(fs) or bool(persisted and persisted["status"] == "processing"), "phase":"waiting" if not fs and persisted and persisted["status"] == "processing" else "processing", "batch_status":persisted["status"] if persisted else None, "files": output_files, "reads_done":sum(x["reads"]["done"] for x in output_files), "reads_total":sum(x["reads"]["total"] for x in output_files)}
+            "active": not (persisted and persisted['status'] in ('cancelled','failed')) and (len(fin) < len(fs) or bool(persisted and persisted["status"] == "processing")), "phase":"waiting" if not fs and persisted and persisted["status"] == "processing" else "processing", "batch_status":persisted["status"] if persisted else None, "error":(persisted.get('result') or {}).get('error') if persisted else None,
+            "files": output_files, "reads_done":sum(x["reads"]["done"] for x in output_files), "reads_total":sum(x["reads"]["total"] for x in output_files),
+            "reads_failed":sum(x['reads']['failed'] for x in output_files),
+            "reads_queued":sum(j['status']=='queued' for x in output_files for j in x['reads']['jobs']),
+            "files_pending":sum(x['worker_stage']=='pending' for x in output_files),
+            "files_retrying":sum(x['worker_stage']=='retry_pending' for x in output_files)}
 
 def _process_upload(path: Path, name: str, size: int, sha: str, force_ai=False) -> dict:
     bid = getattr(_tl, "bid", None)
@@ -306,6 +326,8 @@ def _process_upload(path: Path, name: str, size: int, sha: str, force_ai=False) 
         it = process_one(path, name, size=size, sha=sha, force_ai=force_ai); _prog_done(it)
         return {"items": [it]}
     zid = db.add_file(name, kind="zip", size=size, sha=sha)
+    documents.attach_source(zid,path,sha)
+    documents.index_archive(path,zid)
     items = []
     for ename, tmp, reason in zipio.iter_zip(path):
         if ename == path.name:
@@ -473,9 +495,13 @@ def ai_info():
             "model_image": os.getenv("OPENCODE_VISION_MODEL", "opencode/mimo-v2.6-flash-free"),
             "queued_files": len(db.queued_files()), "cached": db.cached_count()}
 
+@app.get("/api/processing-limit")
+def processing_limit():
+    return db.processing_budget_status()
+
 @app.get("/api/ai-status")
 def ai_status():
-    return {"provider": config.llm_provider(), **db.worker_status(), **ai_info()}
+    return {"processing_limit":db.processing_budget_status(),"provider": config.llm_provider(), **db.worker_status(), **ai_info()}
 
 def _retry_loop():
     """Re-run files that were queued because the AI worker was offline, once it comes back."""
@@ -501,6 +527,7 @@ def _retry_loop():
             logging.exception("retry loop")
 
 def _bind_retry(fid, new_fid):
+    db.copy_file_budget(fid,new_fid)
     for b in db.batches_with_results():
         payload = json.loads(b["result"])
         matching = [i for i in payload.get("items",[]) if i.get("file_id") == fid or i.get("retry_from") == fid]
@@ -612,7 +639,48 @@ def api_links():
 
 @app.get("/api/files")
 def api_files():
-    return db.list_files()
+    return [{k:v for k,v in f.items() if k != "source_path"} for f in documents.library_files()]
+
+@app.get("/api/files/{fid}")
+def api_file(fid:int):
+    file=db.get_file(fid)
+    if not file:raise HTTPException(404,"File not found")
+    return {k:v for k,v in documents.describe_file(file).items() if k != "source_path"}
+
+
+@app.get('/api/files/{fid}/data')
+def file_data(fid:int):
+    file=db.get_file(fid)
+    if not file:raise HTTPException(404,'File not found')
+    return documents.stored_data(file)
+
+
+@app.get("/api/files/{fid}/source")
+def file_source(fid:int,download:int=0):
+    file=db.get_file(fid)
+    if not file:raise HTTPException(404,"File not found")
+    path=documents.source_for_file(file)
+    if path is None:raise HTTPException(404,"Original document unavailable; upload it again")
+    import mimetypes
+    mime=mimetypes.guess_type(file["name"])[0] or "application/octet-stream"
+    safe_inline={"application/pdf","image/png","image/jpeg","image/webp","image/gif"}
+    if not download and mime not in safe_inline:mime="text/plain"
+    return FileResponse(path,filename=Path(file["name"]).name,media_type=mime,content_disposition_type="attachment" if download else "inline",headers={"X-Content-Type-Options":"nosniff"})
+
+
+@app.get("/files/{fid}",response_class=HTMLResponse)
+def file_page(request:Request,fid:int):
+    file=db.get_file(fid)
+    if not file:raise HTTPException(404,"File not found")
+    info=documents.describe_file(file);path=documents.source_for_file(file);preview={"kind":"missing"}
+    if path:
+        try:preview=documents.preview(file,path)
+        except Exception as e:preview={"kind":"error","message":f"Preview unavailable: {type(e).__name__}. Download the original to inspect it."}
+    data=documents.stored_data(file);order=data['order']
+    if order:
+        for po in order['pos']:
+            po['display_sizes']=list(dict.fromkeys(size for line in po['lines'] for size in line['sizes']))
+    return tpl.TemplateResponse(request,"file.html",{"file":info,"preview":preview,"order":order,"data":data,"logs":db.file_logs(fid),"active":"book"})
 
 @app.get("/api/files/{fid}/logs")
 def api_logs(fid: int):
@@ -620,8 +688,8 @@ def api_logs(fid: int):
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request, q: str = ""):
-    return tpl.TemplateResponse(request, "index.html", {"orders": db.list_orders(q or None), "q": q, "files": db.list_files(), "ws": db.worker_status(), "ai": ai_info(),
-                                "llm": config.llm_provider(), "max_mb": config.MAX_UPLOAD_MB, "active": "book"})
+    return tpl.TemplateResponse(request, "index.html", {"orders": db.list_orders(q or None), "q": q, "files": documents.library_files(), "ws": db.worker_status(), "ai": ai_info(),
+                                "llm": config.llm_provider(), "max_mb": config.MAX_UPLOAD_MB, "active": "book", "file_limit":db.processing_budget_status()})
 
 EMPTY = {"id": None, "buyer_name": None, "brand": None, "style_number": None, "factory": None, "planned_line": 1, "fob": None, "smv": None,
          "cm": None, "department": None, "sizes": [], "colors": [], "currency": None, "warnings": [], "pos": [], "file_name": None, "method": None, "review": None}
