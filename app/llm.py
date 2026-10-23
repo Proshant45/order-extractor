@@ -11,18 +11,27 @@ Return strict JSON (no prose) with this shape; use null for anything not present
  "pos":[{"po_number":str,"po_date":"DD.MM.YYYY"|null,"destination":str|null,"ship_date":"DD.MM.YYYY"|null,
    "sales_contract_number":str|null,"stated_total_qty":number|null,"stated_total_value":number|null,
    "lines":[{"style":str|null,"color":str,"color_code":str|null,"sizes":{"<size label>":int},
-             "order_qty":int|null,"rate":number|null,"net_value":number|null}]}]}
-For style_number, join all distinct base styles found in the line items with comma-space if there is no single header style. For department, copy the garment category from the product description if present (for example MEN S SHIRTS). One line per (style,color). "style" is the base style/article code as printed in the style or material column (e.g. "WEC015315"), without appended colour or size codes; put a separate numeric colour code in "color_code". "color" is the colour NAME as printed (e.g. from a material description table), not a code. Dates as printed. Copy every quantity exactly. Sizes keyed by their size code (e.g. "S","M","L","XL","38","15.5","2T"); write words like "small"/"medium"/"large" as S/M/L. Quantities are integers.
+             "order_qty":int|null,"rate":number|null,"net_value":number|null,"freight":number|null}]}]}
+For style_number, join all distinct base styles found in the line items with comma-space if there is no single header style. For department, copy the garment category from the product description if present (for example MEN S SHIRTS). One line per (style,color). "style" is the base style/article code as printed in the style or material column (e.g. "WEC015315"), without appended colour or size codes; put a separate numeric colour code in "color_code". "color" is the colour NAME as printed (e.g. from a material description table), not a code. Dates as printed. Copy every quantity exactly. Sizes keyed by their size code (e.g. "S","M","L","XL","38","15.5","2T"); write words like "small"/"medium"/"large" as S/M/L. Quantities are piece counts.
+RATE: "rate" is the unit cost / FOB price the buyer pays the supplier (e.g. "Unit cost ... USD 7.6000"), never the retail "Unit Selling Price" (e.g. £14.00 / EUR 18.00).
 PACKS: if quantities are given as ratio/assortment/pre-packs (e.g. "Qty of Ratio Packs 130" with a size "Break up Qty" or "Pack Breakup" of 2,2,1...), the size quantity is pieces = number of packs x pieces of that size per pack (130 x 2 = 260). Never report the per-pack breakup as the size quantity. Sizes must add up to the stated total pieces. If several packs share a colour, add their pieces per size.
 PACKS ACROSS DELIVERIES (e.g. Primark): when pack definitions (Pack Id with a size ratio such as XS 2 / S 4 / M 9, or a solid-size pack of 15) are listed once and each delivery/destination lists "Pack Id ... Packs Units", the pieces per size = sum over every delivery of (packs of that Pack Id x that size's ratio units). Add all deliveries together. The result must equal "Total Units".
 ITEMISED LINES WIN: if the document lists one row per SKU (part number / item with its colour, size and quantity) AND also a colour x size summary grid, take the quantities from the itemised rows. Summary grids lose column alignment in extracted text and shift values into the wrong size. Use the grid only to check the totals.
-SHIP DATE: if no separate ship/handover date is printed, use the line "Due Date" / delivery date as ship_date."""
+PROFORMA INVOICES / SALES CONTRACTS: po_number is the PI / contract number when no buyer PO is printed; po_date is the document DATE / ISSUE DATE (e.g. "DATE: September 21, 2026"). If a line prints "VALUE OF GOODS" and a separate "FREIGHT COST", net_value is the value of goods and freight is the freight amount; stated_total_value is the printed grand total.
+ORDER SHEETS WITH A PO COLUMN: if a table has one row per buyer PO / delivery (columns like "Buyer PO", "Qty", "Price", "Value", "Shipment date"), output one PO per distinct PO number (keep placeholders such as "TBA-3"), one line per row, order_qty = the row Qty, rate = the row price, net_value = the row value, ship_date = the row shipment date. A sales-contract / LC number goes in "sales_contract_number" of every PO, never in po_number. Never return an empty pos list when such rows exist. Quantities may be printed with decimals; copy them as printed.
+SHIP DATE: "Earliest Handover Date", "VALID SHIPMENT DATE" and "Shipment date" are ship dates; copy them as printed even without a year (e.g. "NOV-1 ETD"). If no separate ship/handover date is printed, use the line "Due Date" / delivery date as ship_date."""
 
 def _json(text: str) -> dict:
-    m = re.search(r"\{.*\}", text, re.S)
-    if not m:
-        raise ValueError("LLM returned no JSON")
-    return json.loads(m.group(0))
+    """First complete JSON object in the reply (models sometimes repeat or append text after it)."""
+    dec = json.JSONDecoder()
+    for m in re.finditer(r"\{", text or ""):
+        try:
+            obj, _ = dec.raw_decode(text, m.start())
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    raise ValueError("LLM returned no JSON")
 
 IMAGE_BATCH_PREFIX=b'OEIMG1:'
 

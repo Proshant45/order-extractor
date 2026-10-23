@@ -6,23 +6,23 @@ from . import config
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
-CREATE TABLE IF NOT EXISTS files(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES files(id), name TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS files(id INTEGER PRIMARY KEY AUTOINCREMENT, parent_id INTEGER REFERENCES files(id), name TEXT NOT NULL,
   kind TEXT, size INTEGER, sha256 TEXT, status TEXT NOT NULL, reason TEXT, method TEXT, created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY, file_id INTEGER REFERENCES files(id), buyer_name TEXT, brand TEXT,
+CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY AUTOINCREMENT, file_id INTEGER REFERENCES files(id), buyer_name TEXT, brand TEXT,
   style_number TEXT, factory TEXT, planned_line INTEGER, fob REAL, smv REAL, cm REAL, department TEXT, sizes TEXT, colors TEXT,
   currency TEXT, status TEXT DEFAULT 'draft', warnings TEXT, raw_json TEXT, created_at TEXT, updated_at TEXT);
-CREATE TABLE IF NOT EXISTS pos(id INTEGER PRIMARY KEY, order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS pos(id INTEGER PRIMARY KEY AUTOINCREMENT, order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
   po_number TEXT NOT NULL, po_date TEXT, destination TEXT, ship_date TEXT, sales_contract_number TEXT,
   stated_total_qty INTEGER, stated_total_value REAL, currency TEXT, seq INTEGER);
-CREATE TABLE IF NOT EXISTS po_lines(id INTEGER PRIMARY KEY, po_id INTEGER NOT NULL REFERENCES pos(id) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS po_lines(id INTEGER PRIMARY KEY AUTOINCREMENT, po_id INTEGER NOT NULL REFERENCES pos(id) ON DELETE CASCADE,
   seq INTEGER, style TEXT, color TEXT NOT NULL, color_code TEXT, sizes TEXT NOT NULL, order_qty INTEGER, rate REAL, net_value REAL);
-CREATE TABLE IF NOT EXISTS ai_jobs(id INTEGER PRIMARY KEY, status TEXT NOT NULL, prompt TEXT, model TEXT, text TEXT, image BLOB,
+CREATE TABLE IF NOT EXISTS ai_jobs(id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT NOT NULL, prompt TEXT, model TEXT, text TEXT, image BLOB,
   result TEXT, error TEXT, attempts INTEGER DEFAULT 0, lease_id TEXT, lease_until REAL, worker TEXT, created_at TEXT, updated_at TEXT);
 CREATE INDEX IF NOT EXISTS ai_jobs_status ON ai_jobs(status, id);
 CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT);
 CREATE TABLE IF NOT EXISTS batches(id TEXT PRIMARY KEY, status TEXT, name TEXT, result TEXT, created_at TEXT, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS file_budget(file_id INTEGER PRIMARY KEY, created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS extraction_logs(id INTEGER PRIMARY KEY, file_id INTEGER REFERENCES files(id), level TEXT, message TEXT, created_at TEXT);
+CREATE TABLE IF NOT EXISTS extraction_logs(id INTEGER PRIMARY KEY AUTOINCREMENT, file_id INTEGER REFERENCES files(id), level TEXT, message TEXT, created_at TEXT);
 """
 _lock = threading.Lock()
 now = lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
