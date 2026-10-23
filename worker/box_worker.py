@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Box-side AI worker (pull model). Polls the Render app over HTTPS, runs opencode locally, posts results.
+"""Box-side AI worker (pull model). Polls the Render app over HTTPS, runs codex locally, posts results.
 
-Env (from worker/.env, chmod 600): APP_URL, WORKER_TOKEN, OPENCODE_API_KEY, optional WORKER_NAME, WORKER_THREADS, OPENCODE_*.
+Env (from worker/.env, chmod 600): APP_URL, WORKER_TOKEN, optional CODEX_HOME (Codex CLI login dir, default ~/.codex), WORKER_NAME, WORKER_THREADS, CODEX_*.
 Idempotent: results carry the lease_id; a late result after lease expiry is ignored server-side and the job re-runs."""
 import base64, json, os, sys, tempfile, threading, time, traceback, queue, signal
 from dotenv import load_dotenv
 from pathlib import Path
 import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from app import opencode_provider
+from app import codex_provider
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 OUTBOX = Path(os.getenv("WORKER_OUTBOX", str(Path(__file__).resolve().parent / "outbox")))
@@ -63,8 +63,8 @@ def _handle(c, j):
         try: telemetry.put_nowait(stage)
         except queue.Full: log(f"job {j['id']} progress queue full; stage unverified")
     def event(ev):
-        if ev.get("type") == "step_start": progress("model_started")
-        if ev.get("type") == "text": progress("output_received")
+        if ev.get("type") == "turn.started": progress("model_started")
+        if ev.get("type") == "item.completed" and (ev.get("item") or {}).get("type") == "agent_message": progress("output_received")
     progress("starting")
     with tempfile.TemporaryDirectory(prefix="oew_") as d:
         try:
@@ -76,8 +76,8 @@ def _handle(c, j):
                 f=Path(d)/'pages.txt';f.write_text(j.get('text') or '');files.append(f)
             if len(j.get("text") or "") > int(os.getenv("WORKER_MAX_TEXT", "60000")):
                 raise RuntimeError(f"document text too large for one AI read ({len(j['text'])} chars); needs manual review")
-            out = opencode_provider.run(j["prompt"] + '\nRead supplied pages in attachment order. Output JSON only.',files,
-                                        j.get("model"), min(int(os.getenv("OPENCODE_TIMEOUT_S", "300")), j.get("lease_s", 360) - 30), on_event=event, stop_event=stop)
+            out = codex_provider.run(j["prompt"] + '\nRead supplied pages in attachment order. Output JSON only.',files,
+                                        j.get("model"), min(int(os.getenv("CODEX_TIMEOUT_S", "300")), j.get("lease_s", 360) - 30), on_event=event, stop_event=stop)
             body = {"id": j["id"], "lease_id": j["lease_id"], "text": out}
         except Exception as e:
             body = {"id": j["id"], "lease_id": j["lease_id"], "error": f"{e.__class__.__name__}: {e}"[:900]}
@@ -126,7 +126,7 @@ def flush_outbox(c):
             log(f"retained result unreadable: {path.name}: {type(e).__name__}")
 
 def beat():
-    """Heartbeat every 20s while running, so long opencode jobs don't show the worker as offline."""
+    """Heartbeat every 20s while running, so long codex jobs don't show the worker as offline."""
     with httpx.Client(timeout=20) as c:
         while not stop.is_set():
             try: c.post(URL + "/api/worker/heartbeat", json={"worker": NAME, "info": "busy"}, headers=H)
@@ -160,8 +160,8 @@ def loop(i):
                 traceback.print_exc(); time.sleep(10)
 
 if __name__ == "__main__":
-    if not opencode_provider.available():
-        sys.exit("opencode binary not found")
+    if not codex_provider.available():
+        sys.exit("codex binary not found")
     log(f"worker {NAME} -> {URL} threads={THREADS}")
     ts = [threading.Thread(target=loop, args=(i,), daemon=True) for i in range(THREADS)]
     [t.start() for t in ts]

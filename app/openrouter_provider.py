@@ -71,7 +71,10 @@ def _defer(message,seconds):
     raise AIUnavailable(message)
 
 
-def read(prompt,*,text=None,images=(),model=None,_fallback=False):
+def _sleep(seconds):
+    time.sleep(seconds)
+
+def read(prompt,*,text=None,images=(),model=None,_fallback=False,_retry=0):
     from . import llm
     key=os.getenv('OPENROUTER_API_KEY','')
     if not key:raise RuntimeError('Set OPENROUTER_API_KEY on Render')
@@ -121,6 +124,17 @@ def read(prompt,*,text=None,images=(),model=None,_fallback=False):
         if status==200 and details:
             try:status=int(details.get('code',500))
             except (ValueError,TypeError):status=500
+        if status==429 and not _fallback and _retry<int(os.getenv('OPENROUTER_429_RETRIES','2')):
+            # free models are often briefly rate-limited upstream: wait and retry the primary before falling back.
+            # A long Retry-After (e.g. the daily free cap) is not retried here; it defers below as before.
+            max_wait=float(os.getenv('OPENROUTER_429_MAX_WAIT_S','20'))
+            try:after=float(response.headers.get('retry-after') or 0)
+            except ValueError:after=0
+            if after<=max_wait:
+                wait=min(max_wait,max(after,float(os.getenv('OPENROUTER_429_BACKOFF_S','4'))*2**_retry))
+                db.finish_job(job['id'],job['lease_id'],error=f'OpenRouter HTTP 429; retrying {mid} in {wait:.0f}s')
+                _sleep(wait)
+                return read(prompt,text=text,images=images,model=model,_retry=_retry+1)
         if status>=500 or status==429:
             provider_busy=status>=500 or bool(details.get('metadata',{}).get('provider_name'))
             if provider_busy and not _fallback and fallback!=mid:

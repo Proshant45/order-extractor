@@ -1,4 +1,4 @@
-"""AI reader: page text or image -> order JSON. On Render it goes through the job queue to the box worker (opencode)."""
+"""AI reader: page text or image -> order JSON. On Render it goes through the job queue to the box worker (codex)."""
 from __future__ import annotations
 import base64, json, os, re
 import httpx
@@ -44,7 +44,7 @@ def read_page(*, image_png: bytes | None = None, images_png: list[bytes] | None 
     images=images_png if images_png is not None else ([image_png] if image_png is not None else [])
     if images_png is not None:pack_images(images_png)
     if len(images)>1:instructions+='\nThe images and text describe the same ordered pages; never count the same item twice.'
-    default_model=os.getenv('OPENCODE_FAST_MODEL','opencode/mimo-v2.6-flash-free') if os.getenv('AI_READ_MODE','checked')=='checked' else os.getenv('OPENCODE_MODEL','opencode/big-pickle')
+    default_model=os.getenv('CODEX_FAST_MODEL',os.getenv('CODEX_MODEL','gpt-6-luna')) if os.getenv('AI_READ_MODE','checked')=='checked' else os.getenv('CODEX_MODEL','gpt-6-luna')
     if text is not None:
         if len(text) > 60000:
             raise ValueError(f"document text too large for one read ({len(text)} chars); split required, no text discarded")
@@ -54,17 +54,17 @@ def read_page(*, image_png: bytes | None = None, images_png: list[bytes] | None 
     if prov == "queue":
         payload=pack_images(images) if len(images)>1 else (images[0] if images else None)
         return _json(queue_read(instructions,text=text,image_png=payload,model=model or default_model))
-    if prov == "opencode":
+    if prov == "codex":
         import tempfile
         from pathlib import Path
-        from . import opencode_provider
+        from . import codex_provider
         with tempfile.TemporaryDirectory(dir=config.TMP_DIR) as d:
             files=[]
             for i,png in enumerate(images):
                 f=Path(d)/f'page-{i+1}.png';f.write_bytes(png);files.append(f)
             if text is not None:
                 f=Path(d)/'pages.txt';f.write_text(text);files.append(f)
-            return _json(opencode_provider.run(instructions+'\nRead supplied pages in attachment order. Output JSON only.',files,model=model or default_model))
+            return _json(codex_provider.run(instructions+'\nRead supplied pages in attachment order. Output JSON only.',files,model=model or default_model))
     with httpx.Client(timeout=config.LLM_TIMEOUT_S) as c:
         if prov == "gemini":
             model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")  # dual read uses prompt variants
@@ -99,7 +99,7 @@ class AIUnavailable(RuntimeError):
     """AI worker offline / job not picked up in time: file is marked queued_ai and retried later, never failed silently."""
 
 def queue_read(prompt, *, text=None, image_png=None, model=None) -> str:
-    """Pull model: enqueue a job in SQLite; the box worker claims it over HTTPS, runs opencode, posts the result."""
+    """Pull model: enqueue a job in SQLite; the box worker claims it over HTTPS, runs codex, posts the result."""
     import time
     from . import db
     cached=db.completed_read(getattr(CURRENT,'file_id',None),prompt,model,text,image_png)

@@ -275,7 +275,7 @@ def _pdf_units(path: Path, log, ctx):
         doc.close()
 
 def extract_ai_primary(path: Path, kind: str, log, ctx) -> tuple[dict, str]:
-    from . import consensus
+    from . import consensus, guard
     _need_llm(log, f"{kind} structured AI read")
     if kind == "pdf":
         units = _pdf_units(path, log, ctx)
@@ -297,16 +297,28 @@ def extract_ai_primary(path: Path, kind: str, log, ctx) -> tuple[dict, str]:
         chunks=list(_text_chunks(txt));ctx['_document_text']=txt;ctx['_document_det']=det
         units=[{'text':chunk,'page':f'text {i+1}/{len(chunks)}','det':det if len(chunks)==1 else None,
                 'partial':len(chunks)>1,'context':_po_context(txt) if i else ''} for i,chunk in enumerate(chunks)]
-    checked=config.llm_provider()=='openrouter' or os.getenv('AI_READ_MODE','checked' if config.llm_provider() in ('queue','opencode') else 'dual')=='checked'
+    checked=config.llm_provider()=='openrouter' or os.getenv('AI_READ_MODE','checked' if config.llm_provider() in ('queue','codex') else 'dual')=='checked'
     A, B, dis, arith, gerr, status, used_det = [], [], [], [], [], "checked" if checked else "accepted", False
     owner = getattr(llm.CURRENT, "owner", None)
     file_id = getattr(llm.CURRENT,"file_id",None)
+    prev_po=[None]
     def _one(u):
         llm.CURRENT.owner = owner
         llm.CURRENT.file_id = file_id; llm.CURRENT.page = u["page"]
-        if checked:
-            return consensus.checked_read(text=u.get('text'),image_png=u.get('image'),images_png=u.get('images'),det=u['det'],log=log,partial=u.get('partial',False),context=u.get('context',''))
-        return consensus.dual_read(text=u.get("text"), image_png=u.get("image"), images_png=u.get('images'),det=u["det"], log=log,partial=u.get('partial',False),context=u.get('context',''))
+        hint=prev_po[0] or guard.first_po_number(u.get('context') or '') or guard.first_po_number(ctx.get('_document_text') or '')
+        kw=dict(text=u.get('text'),image_png=u.get('image'),images_png=u.get('images'),det=u['det'],log=log,partial=u.get('partial',False),context=u.get('context',''),po_hint=hint)
+        try:
+            r=consensus.checked_read(**kw) if checked else consensus.dual_read(**kw)
+        except llm.AIUnavailable:
+            raise
+        except RuntimeError as e:   # keep the other chunks: this chunk's rows are missing and the order needs review
+            log(f"chunk {u['page']} failed; continuing with the other chunks: {e}", "error")
+            return {'status':'needs_review','disagreements':[],'arithmetic_errors':[],'failed':str(e),
+                    'votes':{'a':{'data':{'pos':[]},'guard_errors':[f"chunk {u['page']} could not be read (its rows are missing): {str(e)[:300]}"],'attempts':0,'model':None},
+                             'b':{'data':None,'guard_errors':[],'attempts':0,'model':None},'deterministic':u['det']},'chosen':'a'}
+        pos=[p for p in (r['votes']['a']['data'] or {}).get('pos') or [] if p.get('po_number')]
+        if pos:prev_po[0]=pos[-1]['po_number']
+        return r
     from concurrent.futures import ThreadPoolExecutor
     parallel=int(os.getenv('AI_PAGE_PARALLEL','1' if checked else '2'))
     if checked and parallel==1:
@@ -317,13 +329,16 @@ def extract_ai_primary(path: Path, kind: str, log, ctx) -> tuple[dict, str]:
     else:
         with ThreadPoolExecutor(max_workers=parallel) as ex:
             units=list(units);results=list(ex.map(_one,units))
+    if results and all(r.get('failed') for r in results):
+        raise RuntimeError("AI reader failed on every chunk: " + results[0]['failed'])
     for u, r in zip(units, results):
         used_det = used_det or u["det"] is not None
         A.append(r["votes"]["a"]["data"]); B.append(r["votes"]["b"]["data"] or {})
         dis += [dict(x, page=u["page"]) for x in r["disagreements"]]
         arith += r["arithmetic_errors"]
         gerr += [f"[{v}] {e}" for v in ("a", "b") for e in r["votes"][v]["guard_errors"]]
-        ctx.setdefault("models", {"a": r["votes"]["a"]["model"], "b": r["votes"]["b"]["model"]})
+        if r["votes"]["a"]["model"] or r["votes"]["b"]["model"]:
+            ctx.setdefault("models", {"a": r["votes"]["a"]["model"], "b": r["votes"]["b"]["model"]})
         ctx["attempts"] = max(ctx.get("attempts") or 0, r["votes"]["a"]["attempts"], r["votes"]["b"]["attempts"])
         if r["status"] not in ("accepted","checked"):
             status = "needs_review"

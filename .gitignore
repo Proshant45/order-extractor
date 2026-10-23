@@ -6,7 +6,7 @@ __pycache__/
 tests/fixtures/*.pdf
 screenshots/
 diff.json
-bin/opencode
+bin/codex
 .ochome/
 worker/.env
 worker/worker.log

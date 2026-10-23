@@ -27,9 +27,9 @@ def llm_provider():
         return 'openrouter' if os.getenv('OPENROUTER_API_KEY') else None
     if os.getenv("AI_QUEUE") == "1" and os.getenv("WORKER_TOKEN"):
         return "queue"
-    if os.getenv("EXTRACTOR", "").lower() == "opencode":
-        from .opencode_provider import available
-        return "opencode" if available() else None
+    if os.getenv("EXTRACTOR", "").lower() == "codex":
+        from .codex_provider import available
+        return "codex" if available() else None
     if os.getenv("GEMINI_API_KEY"):
         return "gemini"
     if os.getenv("OPENAI_API_KEY"):

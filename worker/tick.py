@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """AI-less tick (run every ~15s). Cheap GET /api/worker/pending for the app account; exits at once if 0.
-If jobs are pending, runs the opencode worker in --drain mode (it exits when the queue is empty). One log line per run."""
+If jobs are pending, runs the codex worker in --drain mode (it exits when the queue is empty). One log line per run."""
 import os, subprocess, sys, time, urllib.request, urllib.parse, json
 from dotenv import load_dotenv
 from pathlib import Path
@@ -28,7 +28,7 @@ def main():
     if not n and not any((HERE / "outbox").glob("*.json")):
         return
     t = time.time()
-    env2 = dict(os.environ, PATH=f"{Path.home()}/.opencode/bin:" + os.environ.get("PATH", ""))
+    env2 = dict(os.environ, PATH=f"{Path.home()}/.local/bin:" + os.environ.get("PATH", ""))
     rc = subprocess.call([str(HERE.parent / ".venv/bin/python"), str(HERE / "box_worker.py"), "--drain"], env=env2,
                          stdout=open(HERE / "worker.log", "a"), stderr=subprocess.STDOUT)
     logline(f"pending={n} -> worker ran {round(time.time()-t)}s rc={rc}")

@@ -77,19 +77,19 @@ def compare(a: dict, b: dict, det: dict | None = None) -> list[dict]:
     return out
 
 def models(image: bool) -> tuple[str | None, str | None]:
-    if os.getenv("EXTRACTOR", "").lower() != "opencode" and os.getenv("AI_QUEUE") != "1":
+    if os.getenv("EXTRACTOR", "").lower() != "codex" and os.getenv("AI_QUEUE") != "1":
         return None, None   # gemini/openai: same model, different prompt framing
     if image:   # only mimo reads images among the free Zen models (tested); B = same model, different framing
-        v = os.getenv("OPENCODE_VISION_MODEL", "opencode/mimo-v2.6-flash-free")
-        return v, os.getenv("OPENCODE_VISION_MODEL_B", v)
-    return os.getenv("OPENCODE_MODEL", "opencode/big-pickle"), os.getenv("OPENCODE_MODEL_B", "opencode/mimo-v2.6-flash-free")
+        v = os.getenv("CODEX_VISION_MODEL", "gpt-6-luna")
+        return v, os.getenv("CODEX_VISION_MODEL_B", v)
+    return os.getenv("CODEX_MODEL", "gpt-6-luna"), os.getenv("CODEX_MODEL_B", "gpt-6-luna")
 
 
-def checked_read(*, text=None, image_png=None, images_png=None, det=None, log, partial=False, context=''):
+def checked_read(*, text=None, image_png=None, images_png=None, det=None, log, partial=False, context='', po_hint=None):
     if config.llm_provider()=='openrouter':
         from .openrouter_provider import configured_model
         model=configured_model(bool(images_png) or image_png is not None)
-    else:model=os.getenv('OPENCODE_FAST_MODEL','opencode/mimo-v2.6-flash-free')
+    else:model=os.getenv('CODEX_FAST_MODEL',os.getenv('CODEX_MODEL','gpt-6-luna'))
     llm.CURRENT.vote='A'
     extra=''
     if partial:
@@ -99,28 +99,28 @@ def checked_read(*, text=None, image_png=None, images_png=None, det=None, log, p
     def read(repair):
         llm.CURRENT.vote='Retry' if repair else 'A'
         return llm.read_page(text=text,image_png=image_png,model=model,extra=extra+repair,**({'images_png':images_png} if images_png is not None else {}))
-    data,errors,attempts=guard.ai_extract_with_guard(read,text,log,max_repairs=1,det=det,partial=partial,check_coverage=True)
+    data,errors,attempts=guard.ai_extract_with_guard(read,text,log,max_repairs=1,det=det,partial=partial,check_coverage=True,po_hint=po_hint)
     status='needs_review' if errors else 'checked'
     log(f'Chunk checks: {status}; reads={attempts}')
     return {'status':status,'disagreements':[],'arithmetic_errors':guard.arithmetic_errors(data,check_totals=not partial),
             'votes':{'a':{'data':data,'guard_errors':errors,'attempts':attempts,'model':getattr(llm.CURRENT,'used_model',model) if config.llm_provider()=='openrouter' else model},
                      'b':{'data':None,'guard_errors':[],'attempts':0,'model':None},'deterministic':det},'chosen':'a'}
 
-def dual_read(*, text: str | None = None, image_png: bytes | None = None, images_png=None, det: dict | None, log,partial=False,context='') -> dict:
+def dual_read(*, text: str | None = None, image_png: bytes | None = None, images_png=None, det: dict | None, log,partial=False,context='',po_hint=None) -> dict:
     ma, mb = models(image_png is not None or bool(images_png))
     owner = getattr(llm.CURRENT, "owner", None)
     file_id, page = getattr(llm.CURRENT,"file_id",None), getattr(llm.CURRENT,"page",None)
     def vote(model, variant, tag):
         llm.CURRENT.file_id = file_id; llm.CURRENT.page = page; llm.CURRENT.vote = tag
         llm.CURRENT.owner = owner   # thread-local does not cross into the pool threads
-        cands = [model] + [m for m in os.getenv("OPENCODE_FALLBACK_MODELS", "opencode/step-5-preview-free,opencode/big-pickle").split(",")
-                           if m and m != model] if (os.getenv("EXTRACTOR", "").lower() == "opencode" or os.getenv("AI_QUEUE") == "1") and image_png is None else [model]
+        cands = [model] + [m for m in os.getenv("CODEX_FALLBACK_MODELS", "").split(",")
+                           if m and m != model] if (os.getenv("EXTRACTOR", "").lower() == "codex" or os.getenv("AI_QUEUE") == "1") and image_png is None else [model]
         last = None
         for m in cands:
             framing=variant+('\nContinuation chunk: never duplicate earlier item rows. Whole-PO totals are checked after merging.' if partial else '')+('\nIdentification context only, no item rows:\n'+context if context else '')
             read = lambda extra, m=m: llm.read_page(text=text, image_png=image_png, extra=framing + extra, model=m,**({'images_png':images_png} if images_png is not None else {}))
             try:
-                d, errs, n = guard.ai_extract_with_guard(read, text, lambda msg, lvl="info": log(f"[{tag}:{m}] {msg}", lvl), max_repairs=1, det=det,partial=partial)
+                d, errs, n = guard.ai_extract_with_guard(read, text, lambda msg, lvl="info": log(f"[{tag}:{m}] {msg}", lvl), max_repairs=1, det=det,partial=partial,po_hint=po_hint)
                 return {"data": d, "guard_errors": errs, "attempts": n, "model": m or "default"}
             except llm.AIUnavailable:
                 raise                    # worker down: queue the whole file, don't burn fallbacks

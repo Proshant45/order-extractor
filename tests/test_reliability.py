@@ -107,19 +107,19 @@ def test_interrupted_batch_replays_retained_input(client, monkeypatch, tmp_path)
     assert not source.exists()
 
 
-def test_partial_opencode_text_is_not_a_completed_answer(monkeypatch, tmp_path):
-    from app import opencode_provider as oc
-    exe = tmp_path/'fake-opencode'
-    exe.write_text('#!/usr/bin/env python3\nimport json\nprint(json.dumps({"type":"text","part":{"text":"{\\\"pos\\\":[]}"}}),flush=True)\n')
+def test_partial_codex_text_is_not_a_completed_answer(monkeypatch, tmp_path):
+    from app import codex_provider as oc
+    exe = tmp_path/'fake-codex'
+    exe.write_text('#!/usr/bin/env python3\nimport json\nprint(json.dumps({"type":"item.completed","item":{"type":"agent_message","text":"{\\\"pos\\\":[]}"}}),flush=True)\n')
     exe.chmod(0o755)
     monkeypatch.setattr(oc,'binary',lambda:str(exe))
     with pytest.raises(RuntimeError,match='completion'):
         oc.run('prompt',timeout=2)
 
 
-def test_opencode_partial_line_cannot_bypass_deadline(monkeypatch, tmp_path):
-    from app import opencode_provider as oc
-    exe = tmp_path/'fake-opencode'
+def test_codex_partial_line_cannot_bypass_deadline(monkeypatch, tmp_path):
+    from app import codex_provider as oc
+    exe = tmp_path/'fake-codex'
     exe.write_text('#!/usr/bin/env python3\nimport sys,time\nsys.stdout.write("{partial");sys.stdout.flush();time.sleep(2)\n')
     exe.chmod(0o755)
     monkeypatch.setattr(oc,'binary',lambda:str(exe))
@@ -340,17 +340,17 @@ def test_retry_progress_binds_new_jobs(client):
 
 
 def test_slow_event_callback_cannot_accept_after_timeout(monkeypatch, tmp_path):
-    from app import opencode_provider as oc
-    exe=tmp_path/'fake-opencode'
-    exe.write_text('#!/usr/bin/env python3\nimport json,sys\nevents=[{"type":"text","part":{"text":"x"}}]*12+[{"type":"step_finish","part":{"reason":"stop"}}]\nsys.stdout.write("\\n".join(json.dumps(e) for e in events)+"\\n");sys.stdout.flush()\n')
+    from app import codex_provider as oc
+    exe=tmp_path/'fake-codex'
+    exe.write_text('#!/usr/bin/env python3\nimport json,sys\nevents=[{"type":"item.completed","item":{"type":"agent_message","text":"x"}}]*12+[{"type":"turn.completed"}]\nsys.stdout.write("\\n".join(json.dumps(e) for e in events)+"\\n");sys.stdout.flush()\n')
     exe.chmod(0o755);monkeypatch.setattr(oc,'binary',lambda:str(exe))
     with pytest.raises(TimeoutError):oc.run('p',timeout=.15,on_event=lambda event:time.sleep(.04))
 
 
 def test_worker_shutdown_cancels_its_model_process(monkeypatch, tmp_path):
     import threading
-    from app import opencode_provider as oc
-    exe=tmp_path/'fake-opencode';exe.write_text('#!/usr/bin/env python3\nimport time\ntime.sleep(30)\n');exe.chmod(0o755)
+    from app import codex_provider as oc
+    exe=tmp_path/'fake-codex';exe.write_text('#!/usr/bin/env python3\nimport time\ntime.sleep(30)\n');exe.chmod(0o755)
     monkeypatch.setattr(oc,'binary',lambda:str(exe));stop=threading.Event();stop.set()
     start=time.monotonic()
     with pytest.raises(InterruptedError):oc.run('p',timeout=30,stop_event=stop)
@@ -368,3 +368,12 @@ def test_dropdown_choices_use_saved_orders_and_keep_unknown_values(client):
     page=client.get('/orders/new').text
     assert 'Real brand' in page and 'Real factory' in page
     client.delete(f'/api/orders/{oid}')
+
+
+def test_codex_answer_accepted_on_turn_completed(monkeypatch, tmp_path):
+    from app import codex_provider as oc
+    exe=tmp_path/'fake-codex'
+    exe.write_text('#!/usr/bin/env python3\nimport json,sys\nassert "exec" in sys.argv and "read-only" in sys.argv and "--skip-git-repo-check" in sys.argv\nprompt=sys.stdin.read()\nassert "DOC-TEXT" in prompt\nfor e in [{"type":"turn.started"},{"type":"item.completed","item":{"type":"agent_message","text":"{\\"pos\\": []}"}},{"type":"turn.completed"}]:print(json.dumps(e),flush=True)\n')
+    exe.chmod(0o755);monkeypatch.setattr(oc,'binary',lambda:str(exe))
+    f=tmp_path/'pages.txt';f.write_text('DOC-TEXT')
+    assert oc.run('p',[f],timeout=10)=='{"pos": []}'

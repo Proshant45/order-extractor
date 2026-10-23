@@ -13,7 +13,7 @@ def _po(page):
 
 def _run(monkeypatch, reader, path=SAMPLE):
     monkeypatch.setenv('AI_READ_MODE','dual')
-    monkeypatch.setenv("EXTRACTOR", "opencode"); monkeypatch.setenv("OPENCODE_FALLBACK_MODELS", "")
+    monkeypatch.setenv("EXTRACTOR", "codex"); monkeypatch.setenv("CODEX_FALLBACK_MODELS", "")
     monkeypatch.setattr(extract, "_need_llm", lambda *a, **k: None)
     monkeypatch.setattr(llm, "read_page", reader)
     monkeypatch.setattr(consensus.guard, "text_errors", lambda d, t: [])

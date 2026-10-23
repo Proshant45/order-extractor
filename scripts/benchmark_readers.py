@@ -3,7 +3,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import sys
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent))
-from app import opencode_provider,llm
+from app import codex_provider,llm
 from app.schema import Order
 from tests_expected import checks
 import pdfplumber
@@ -16,7 +16,7 @@ def one(model):
     t=time.monotonic()
     r={'model':model}
     try:
-        raw=opencode_provider.run(llm.PROMPT+'\nDOCUMENT TEXT:\n'+text,model=model,timeout=180)
+        raw=codex_provider.run(llm.PROMPT+'\nDOCUMENT TEXT:\n'+text,model=model,timeout=180)
         d=llm._json(raw);o=Order.model_validate(d).model_dump(mode='json')
         r.update(elapsed_s=round(time.monotonic()-t,1),checks=checks(o),data=d)
         print(model,r['elapsed_s'],'seconds',sum(x['ok'] for x in r['checks']),'/',len(r['checks']),flush=True)
@@ -25,4 +25,4 @@ def one(model):
     (output/(model.replace('/','-')+'-benchmark.json')).write_text(json.dumps(r,indent=2))
     return r
 with ThreadPoolExecutor(max_workers=2) as pool:
-    list(pool.map(one,['opencode/mimo-v2.6-flash-free','opencode/step-5-preview-free']))
+    list(pool.map(one,['gpt-6-luna','gpt-6.1-sol']))

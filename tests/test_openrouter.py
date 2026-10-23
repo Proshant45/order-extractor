@@ -40,7 +40,7 @@ def api(monkeypatch,tmp_path):
 def test_openrouter_key_overrides_old_worker_settings(monkeypatch):
     monkeypatch.setenv('OPENROUTER_API_KEY','private-test-key')
     monkeypatch.setenv('AI_QUEUE','1');monkeypatch.setenv('WORKER_TOKEN','old-worker-token')
-    monkeypatch.setenv('EXTRACTOR','opencode')
+    monkeypatch.setenv('EXTRACTOR','codex')
     assert config.llm_provider()=='openrouter'
 
 
@@ -155,7 +155,8 @@ def test_catalog_outage_preserves_retry_instead_of_failing_file(api,monkeypatch)
 def test_embedded_api_outage_retains_input_for_retry(api,monkeypatch,code):
     provider,_,responses=api
     monkeypatch.setenv('OPENROUTER_FALLBACK_MODEL',FREE_TEXT)
-    responses.append(httpx.Response(200,json={'error':{'code':code,'message':'Unavailable'}}))
+    monkeypatch.setattr(provider,'_sleep',lambda s:None)   # 429 is retried with backoff first; a persistent outage still defers
+    responses.extend(httpx.Response(200,json={'error':{'code':code,'message':'Unavailable'}}) for _ in range(3))
     with pytest.raises(llm.AIUnavailable):provider.read('prompt',text='document')
     assert not provider.ready_for_retry()
 
@@ -209,3 +210,25 @@ def test_deploy_retries_only_old_truncation_failures_and_reuses_budget(api,monke
     assert db.get_file(unrelated)['status']=='failed' and db.get_file(missing)['status']=='failed'
     assert main._recover_openrouter_truncations()==0
     assert db.processing_budget_status()['used']==1
+
+
+def test_short_429_backs_off_and_retries_primary_before_fallback(api,monkeypatch):
+    provider,requests,responses=api
+    monkeypatch.setenv('OPENROUTER_FALLBACK_MODEL',FREE_VISION)
+    waits=[];monkeypatch.setattr(provider,'_sleep',waits.append)
+    busy={'error':{'message':'rate limited upstream','metadata':{'provider_name':'X'}}}
+    responses.extend([httpx.Response(429,json=busy),httpx.Response(429,json=busy)])
+    assert provider.read('prompt',text='document')=={'pos':[]}
+    models=[json.loads(r.content)['model'] for r in requests if r.url.path.endswith('/chat/completions')]
+    assert models==[FREE_TEXT]*3 and waits==[4,8]
+
+
+def test_429_falls_back_after_backoff_retries_are_used(api,monkeypatch):
+    provider,requests,responses=api
+    monkeypatch.setenv('OPENROUTER_FALLBACK_MODEL',FREE_VISION);monkeypatch.setenv('OPENROUTER_429_RETRIES','1')
+    monkeypatch.setattr(provider,'_sleep',lambda s:None)
+    busy={'error':{'message':'rate limited upstream','metadata':{'provider_name':'X'}}}
+    responses.extend([httpx.Response(429,json=busy),httpx.Response(429,json=busy)])
+    provider.read('prompt',text='document')
+    models=[json.loads(r.content)['model'] for r in requests if r.url.path.endswith('/chat/completions')]
+    assert models==[FREE_TEXT,FREE_TEXT,FREE_VISION]

@@ -513,8 +513,8 @@ def ai_info():
         return {'reader':'openrouter','configured':bool(os.getenv('OPENROUTER_API_KEY')),'model_a':configured_model(),
                 'model_b':None,'model_image':configured_model(True),'running_api_reads':active,
                 'waiting_retry':not ready_for_retry(),'queued_files':len(db.queued_files()),'cached':db.cached_count()}
-    return {"model_a": os.getenv("OPENCODE_MODEL", "opencode/big-pickle"), "model_b": os.getenv("OPENCODE_MODEL_B", "opencode/mimo-v2.6-flash-free"),
-            "model_image": os.getenv("OPENCODE_VISION_MODEL", "opencode/mimo-v2.6-flash-free"),
+    return {"model_a": os.getenv("CODEX_MODEL", "gpt-6-luna"), "model_b": os.getenv("CODEX_MODEL_B", "gpt-6-luna"),
+            "model_image": os.getenv("CODEX_VISION_MODEL", "gpt-6-luna"),
             "queued_files": len(db.queued_files()), "cached": db.cached_count()}
 
 

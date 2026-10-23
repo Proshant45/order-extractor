@@ -28,7 +28,7 @@
 <tr><td>API configuration</td><td><span id="st_online" class="pill">{{ 'Key configured' if ai.configured else 'OPENROUTER_API_KEY missing' }}</span></td></tr>
 <tr><td>API retry</td><td id="st_seen">{{ 'Waiting for retry window' if ai.waiting_retry else 'No retry pending' }}</td></tr>
 <tr><td>Running AI reads</td><td id="st_q">{{ ai.running_api_reads }}</td></tr>
-{% else %}<tr><td>AI reader</td><td>opencode on the worker box</td></tr>
+{% else %}<tr><td>AI reader</td><td>Codex CLI on the worker box</td></tr>
 <tr><td>Read A (text)</td><td>{{ ai.model_a }}</td></tr><tr><td>Read B (text)</td><td>{{ ai.model_b }}</td></tr><tr><td>Images / scans (A and B)</td><td>{{ ai.model_image }}</td></tr>
 <tr><td>Worker</td><td><span id="st_online" class="pill {{ 'done' if ws.online else 'failed' }}">{{ 'online' if ws.online else 'offline' }}</span></td></tr>
 <tr><td>Last heartbeat</td><td id="st_seen">{{ (ws.last_seen_s|string + 's ago') if ws.last_seen_s is not none else 'never' }}</td></tr>

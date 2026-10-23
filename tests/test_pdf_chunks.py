@@ -45,7 +45,7 @@ def test_only_invalid_chunk_is_read_again(monkeypatch):
     monkeypatch.setattr(llm,'read_page',read)
     ctx={};data,_=extract.extract_ai_primary(Path('input.pdf'),'pdf',lambda *a:None,ctx)
     assert [calls[u['text']] for u in units]==[1,2]
-    assert all(m=='opencode/mimo-v2.6-flash-free' for m in models)
+    assert all(m=='gpt-6-luna' for m in models)
     assert ctx['consensus']['status']=='checked'
     assert sum(p['stated_total_qty'] for p in data['pos'])==30
 

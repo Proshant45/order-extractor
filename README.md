@@ -65,6 +65,17 @@ pytest -q
 
 Tests use temporary databases and disable real API keys by default. The sample PO fixture is gitignored; use `SAMPLE_PDF` when needed.
 
-## Optional legacy OpenCode worker
+## Optional Codex worker (replaces the old OpenCode worker)
 
-Explicitly set `EXTRACTOR=queue`, `AI_QUEUE=1`, `WORKER_TOKEN` and remove `OPENROUTER_API_KEY` to use an existing box setup. `worker/.env` requires `APP_URL`, `WORKER_TOKEN`, `APP_ACCOUNT` and legacy model settings. `worker/tick_loop.sh` checks every 15 seconds and drains jobs with `worker/box_worker.py`. `AI_READ_MODE=dual` enables legacy independent reads. This mode is optional; OpenRouter does not call OpenCode. Legacy local verification scripts remain in `scripts/`.
+The Codex backend runs the Codex CLI non-interactively: `codex exec --json --skip-git-repo-check --ephemeral -s read-only -m $CODEX_MODEL -` with the prompt on stdin, page images attached with `-i`, in a throwaway directory. The answer is accepted only on `turn.completed`, then goes through the same JSON parsing, schema validation and guard checks as every other reader.
+
+- `EXTRACTOR=codex` runs it in-process (local use, needs the `codex` binary and a login on that machine; the health check reports `llm: codex`).
+- On Render use the queue: set `EXTRACTOR=queue`, `AI_QUEUE=1`, `WORKER_TOKEN` and remove `OPENROUTER_API_KEY`; the box worker (`worker/box_worker.py`, drained by `worker/tick_loop.sh`) claims jobs over HTTPS and runs Codex with the box's own `codex login` (ChatGPT account). `worker/.env` needs `APP_URL`, `WORKER_TOKEN`, `APP_ACCOUNT`.
+- Settings: `CODEX_MODEL` (default `gpt-6-luna`, the fast model a ChatGPT login allows), `CODEX_FAST_MODEL`, `CODEX_MODEL_B`, `CODEX_VISION_MODEL`, `CODEX_REASONING` (default `low`), `CODEX_TIMEOUT_S` (300), `CODEX_RETRIES` (1), `CODEX_MEM_MB` (1400), `CODEX_BIN`, `CODEX_HOME`.
+
+## Extraction resilience
+
+- A continuation chunk whose PO number is not printed inherits it from the previous chunk or the file's detected PO number (logged as a warning) instead of failing validation.
+- Text in a numeric field (`fob`, `smv`, `cm`, `rate`, `net_value`, `stated_total_value`) becomes empty plus a warning instead of rejecting the read.
+- If one chunk of a multi-chunk file still fails, the other chunks are kept and the order is saved as `needs_review` with the missing chunk named; only a file where every chunk fails is marked failed.
+- OpenRouter 429 on the primary model is retried with backoff (`OPENROUTER_429_RETRIES`=2, `OPENROUTER_429_BACKOFF_S`=4, `OPENROUTER_429_MAX_WAIT_S`=20) before falling back; a long `Retry-After` (daily cap) still defers as before.

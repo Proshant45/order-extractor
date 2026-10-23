@@ -2,7 +2,7 @@
 from __future__ import annotations
 import json, re
 from . import llm, parsers
-from .schema import Order, to_qty
+from .schema import Order, to_qty, to_num
 
 def _norm(s):
     return re.sub(r"[^A-Z0-9]", "", str(s or "").upper())
@@ -50,7 +50,7 @@ def text_errors(d: dict, text: str | None) -> list[str]:
         for key in ("stated_total_qty", "stated_total_value"):
             if p.get(key) is not None and not number_present(p[key]):
                 e.append(f"PO {p.get('po_number')} {key} {p[key]} not in document text")
-        if p.get("po_number") and _norm(p["po_number"]) not in nt:
+        if p.get("po_number") and not p.get("_po_inherited") and _norm(p["po_number"]) not in nt:
             e.append(f"po_number {p['po_number']} not in document text")
         for l in p.get("lines") or []:
             if not l.get("sizes") and l.get("order_qty") is not None and not number_present(l["order_qty"]):
@@ -93,20 +93,64 @@ def coverage_errors(d, text):
     found={_norm(p.get('po_number')) for p in d.get('pos') or []}
     return [f'Printed PO {no} was not extracted' for no in sorted(expected-found)]
 
-def ai_extract_with_guard(read, text: str | None, log, max_repairs: int = 2, det=None, partial=False, check_coverage=False) -> tuple[dict, list[str], int]:
-    """read(extra_instructions) -> dict. Returns (result, residual_errors, attempts)."""
+def first_po_number(text):
+    m = PO_NUMBER.search(text or "")
+    return m.group(1) if m else None
+
+def _not_a_number(v):
+    if v in (None, "") or isinstance(v, (int, float)) and not isinstance(v, bool):
+        return False
+    try:
+        to_num(v); return False
+    except (ValueError, TypeError):
+        return True
+
+def soften(d, po_hint=None) -> list[str]:
+    """Recoverable model slips become warnings instead of rejecting the whole read:
+    text in a numeric price field -> null + warning; a PO without a number (continuation chunk) inherits po_hint."""
+    notes = []
+    if not isinstance(d, dict):
+        return notes
+    for k in ("fob", "smv", "cm"):
+        if _not_a_number(d.get(k)):
+            notes.append(f"warning: {k} was text ({str(d[k])[:60]!r}); set to empty, fill manually"); d[k] = None
+    for p in d.get("pos") or []:
+        if not isinstance(p, dict):
+            continue
+        if po_hint and _norm(p.get("po_number")) == _norm(po_hint):
+            p["_po_inherited"] = True   # continuation chunk repeating the PO number from its context: not a hallucination
+        elif not str(p.get("po_number") or "").strip():
+            if po_hint:
+                p["po_number"] = str(po_hint); p["_po_inherited"] = True
+                notes.append(f"warning: PO number not printed in this chunk; continued from PO {po_hint}")
+        if _not_a_number(p.get("stated_total_value")):
+            notes.append(f"warning: PO {p.get('po_number')} stated_total_value was text ({str(p['stated_total_value'])[:60]!r}); set to empty")
+            p["stated_total_value"] = None
+        for l in p.get("lines") or []:
+            if not isinstance(l, dict):
+                continue
+            for k in ("rate", "net_value"):
+                if _not_a_number(l.get(k)):
+                    notes.append(f"warning: PO {p.get('po_number')} {l.get('style') or ''}/{l.get('color') or ''} {k} was text ({str(l[k])[:60]!r}); set to empty")
+                    l[k] = None
+    return notes
+
+def ai_extract_with_guard(read, text: str | None, log, max_repairs: int = 2, det=None, partial=False, check_coverage=False, po_hint=None) -> tuple[dict, list[str], int]:
+    """read(extra_instructions) -> dict. Returns (result, residual_errors + soft warnings, attempts)."""
     if det is None and text and parsers.looks_like_sap_po(text):
         det = parsers.parse_sap_po(text)
-    extra, best, best_err = "", None, None
+    extra, best, best_err, best_notes = "", None, None, []
     for attempt in range(1, max_repairs + 2):
         try:
             d = read(extra)
         except llm.AIUnavailable:
             raise
         except Exception as ex:
-            log(f"AI attempt {attempt} failed: {ex}", "warn"); errs = [f"AI call failed: {ex}"]; d = None
+            log(f"AI attempt {attempt} failed: {ex}", "warn"); errs = [f"AI call failed: {ex}"]; d = None; notes = []
         else:
             try:
+                notes = soften(d, po_hint)
+                for n in notes: log(n, "warn")
                 Order.model_validate(d)
                 errs = arithmetic_errors(d,check_totals=not partial) + text_errors(d, text) + (compare_to_deterministic(d, det) if det else [])
                 if check_coverage:
@@ -114,14 +158,14 @@ def ai_extract_with_guard(read, text: str | None, log, max_repairs: int = 2, det
                     if not d.get('pos') or any(not p.get('lines') for p in d.get('pos') or []):
                         errs.append('No usable PO lines extracted')
             except (ValueError, TypeError, AttributeError) as ex:
-                errs = [f"invalid structured output: {ex}"]; d = None
+                errs = [f"invalid structured output: {ex}"]; d = None; notes = []
         log(f"AI attempt {attempt}: {len(errs)} guard error(s)" + (": " + "; ".join(errs[:8]) if errs else ""), "warn" if errs else "info")
         if d is not None and (best_err is None or len(errs) < len(best_err)):
-            best, best_err = d, errs
+            best, best_err, best_notes = d, errs, notes
         if d is not None and not errs:
-            return d, [], attempt
+            return d, notes, attempt
         extra = ("\nYour previous answer failed these checks. Re-read the document carefully and fix them. "
                  "Do not invent numbers; every quantity must appear in the document:\n- " + "\n- ".join(errs[:25]))
     if best is None:
         raise RuntimeError("AI reader failed on every attempt: " + "; ".join(errs[:3]))
-    return best, best_err, max_repairs + 1
+    return best, best_err + best_notes, max_repairs + 1
