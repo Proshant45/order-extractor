@@ -154,8 +154,8 @@ def process_one(path: Path, name: str, parent_id=None, size=None, sha=None, forc
             for e in errs: lg(e, "error")
             db.update_file(fid, status="failed", reason="validation: " + "; ".join(errs)[:500], method=method)
             return {"file_id": fid, "name": name, "status": "failed", "reason": "; ".join(errs), "category": ctx["category"]}
-        for e in ctx.get("guard_errors") or []:
-            warns.append("AI guard: " + e)
+        from .guard import dedupe_messages
+        warns = dedupe_messages(warns + ["AI guard: " + e for e in ctx.get("guard_errors") or []])
         for w in warns: lg(w, "warn")
         oid = db.save_order(order, warns, file_id=fid, raw=data)
         cons = ctx.get("consensus")

@@ -129,6 +129,30 @@ def _forced_ai_pdf(path, texts, scanned, log, ctx):
         doc.close()
     return llm.merge_pages(pages), "pdf_ai_vision"
 
+def cell_text(v, ctype=None, datemode=0) -> str:
+    """Spreadsheet cell as a person reads it: dates as YYYY-MM-DD, 9031136.0 as 9031136, float noise trimmed."""
+    from datetime import date, datetime
+    if v is None:
+        return ""
+    if ctype is not None:
+        import xlrd
+        if ctype == xlrd.XL_CELL_DATE:
+            try:
+                v = xlrd.xldate_as_datetime(v, datemode)
+            except Exception:
+                pass
+        elif ctype == xlrd.XL_CELL_BOOLEAN:
+            return str(bool(v))
+    if isinstance(v, datetime):
+        return v.date().isoformat() if (v.hour, v.minute, v.second) == (0, 0, 0) else v.isoformat(sep=" ")
+    if isinstance(v, date):
+        return v.isoformat()
+    if isinstance(v, float):
+        if v.is_integer():
+            return str(int(v))
+        return f"{v:.6f}".rstrip("0").rstrip(".")
+    return str(v)
+
 def _as_text(path: Path, kind: str) -> str | None:
     if kind == "csv":
         return path.read_text(errors="replace")[:200000]
@@ -143,7 +167,7 @@ def _as_text(path: Path, kind: str) -> str | None:
                     if i >= 20000:
                         raise Skip(f"worksheet {sheet.title} exceeds 20000 rows; no partial order saved")
                     if any(c is not None for c in row):
-                        rows.append("\t".join("" if c is None else str(c) for c in row).rstrip("\t"))
+                        rows.append("\t".join(cell_text(c) for c in row).rstrip("\t"))
             return "\n".join(rows)
         finally:
             with_rows.close()
@@ -155,7 +179,7 @@ def _as_text(path: Path, kind: str) -> str | None:
         import xlrd
         wb = xlrd.open_workbook(str(path), on_demand=True)
         sh = wb.sheet_by_index(0)
-        return "\n".join("\t".join(str(c.value) for c in sh.row(i)) for i in range(min(sh.nrows, 5000)))
+        return "\n".join("\t".join(cell_text(c.value, c.ctype, wb.datemode) for c in sh.row(i)).rstrip("\t") for i in range(min(sh.nrows, 5000)))
     if kind == "eml":
         import email
         from email import policy

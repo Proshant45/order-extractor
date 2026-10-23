@@ -4,7 +4,10 @@ from datetime import date, datetime
 from typing import Optional, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-DATE_FORMATS = ("%d.%m.%Y", "%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%y", "%d.%m.%y", "%m/%d/%Y", "%d-%b-%Y", "%d %b %Y")
+DATE_FORMATS = ("%d.%m.%Y", "%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%d/%m/%y", "%d.%m.%y", "%m/%d/%Y", "%d-%b-%Y", "%d %b %Y",
+                "%d-%b-%y", "%d %b %y", "%B %d, %Y", "%b %d, %Y", "%B %d %Y", "%b %d %Y", "%d %B %Y", "%d-%B-%Y")
+NO_YEAR_FORMATS = ("%b-%d", "%b %d", "%d-%b", "%d %b", "%B %d", "%d %B")
+_DATE_NOISE = re.compile(r"\s*\b(?:ETD|ETA|LATEST|EARLIEST|ON OR BEFORE|BY)\b\.?\s*", re.I)
 
 def parse_date(v):
     if v in (None, ""):
@@ -17,7 +20,29 @@ def parse_date(v):
             return datetime.strptime(s, f).date()
         except ValueError:
             pass
+    cleaned = _DATE_NOISE.sub(" ", s).strip(" ,.")
+    if cleaned != s:
+        return parse_date(cleaned)
     raise ValueError(f"unparseable date: {s!r}")
+
+def parse_date_no_year(v, after: date | None):
+    """'NOV-1 ETD' printed without a year: first such date on/after the reference (document) date."""
+    if v in (None, "") or after is None:
+        return None
+    s = _DATE_NOISE.sub(" ", str(v)).strip(" ,.").title()
+    for f in NO_YEAR_FORMATS:
+        try:
+            d = datetime.strptime(f"{s} 2000", f + " %Y").date()
+        except ValueError:
+            continue
+        for y in (after.year, after.year + 1):
+            try:
+                c = d.replace(year=y)
+            except ValueError:
+                continue
+            if c >= after:
+                return c
+    return None
 
 def to_num(v):
     if v in (None, ""):
@@ -27,11 +52,16 @@ def to_num(v):
         raise ValueError("number must be finite")
     return n
 
+QTY_EPS = 1e-6   # spreadsheet float noise (e.g. 559.9999999999999) is a whole number
+
+def near_whole(n) -> bool:
+    return abs(n - round(n)) < QTY_EPS
+
 def to_qty(v):
     n = to_num(v)
-    if n is not None and (n < 0 or n != int(n)):
+    if n is not None and (n < 0 or not near_whole(n)):
         raise ValueError("quantity must be a non-negative whole number")
-    return None if n is None else int(n)
+    return None if n is None else int(round(n))
 
 SIZE_ALIASES = {"SMALL": "S", "MEDIUM": "M", "MED": "M", "LARGE": "L", "XLARGE": "XL", "EXTRALARGE": "XL", "XSMALL": "XS",
                 "EXTRASMALL": "XS", "XXLARGE": "XXL", "2XL": "XXL", "XXXL": "3XL", "SM": "S", "LG": "L", "MD": "M"}
@@ -58,6 +88,8 @@ class POLine(BaseModel):
     order_qty: Optional[int] = None
     rate: Optional[float] = None
     net_value: Optional[float] = None
+    freight: Optional[float] = None        # per-line freight / other charge printed separately from the goods value
+    qty_rounded: bool = False              # quantity was a fractional spreadsheet value rounded to whole pieces
 
     @field_validator("sizes", mode="before")
     @classmethod
@@ -67,9 +99,9 @@ class POLine(BaseModel):
             n = to_num(q)
             if n is None:
                 continue
-            if n < 0 or n != int(n):
+            if n < 0 or not near_whole(n):
                 raise ValueError(f"size {k}: quantity must be a non-negative whole number, got {q}")
-            out[norm_size(k)] = out.get(norm_size(k), 0) + int(n)
+            out[norm_size(k)] = out.get(norm_size(k), 0) + int(round(n))
         return out
 
     @field_validator("order_qty", mode="before")
@@ -77,7 +109,7 @@ class POLine(BaseModel):
     def _qty(cls, v):
         return to_qty(v)
 
-    @field_validator("rate", "net_value", mode="before")
+    @field_validator("rate", "net_value", "freight", mode="before")
     @classmethod
     def _f(cls, v):
         return to_num(v)
@@ -104,6 +136,10 @@ class PO(BaseModel):
                     d[k] = parse_date(d.get(k))
                 except ValueError:
                     raw[k] = str(d.get(k)); d[k] = None
+            if raw.get("ship_date") and d.get("po_date"):
+                inferred = parse_date_no_year(raw["ship_date"], d["po_date"])
+                if inferred:
+                    d["ship_date"] = inferred; raw.pop("ship_date")
             d["date_raw"] = raw
         return d
 
@@ -160,6 +196,14 @@ class Order(BaseModel):
             self.colors = list(dict.fromkeys(l.color for p in self.pos for l in p.lines))
         return self
 
+def value_matches(rate, qty, net_value, freight=None, rounded=False) -> bool:
+    """rate x qty equals the printed value, or the value plus separately printed freight
+    (CFR/CIF invoices print 'value of goods' and 'freight' with rate x qty = their sum).
+    A rounded fractional quantity may move the product by up to half a unit price."""
+    tol = 0.011 + (abs(float(rate)) * 0.5 if rounded else 0)
+    gross = float(rate) * qty
+    return any(abs(gross - v) <= tol for v in (float(net_value), float(net_value) + float(freight or 0)))
+
 REQUIRED = ["buyer_name", "style_number", "factory", "department"]
 
 def warnings_for(order: Order) -> list[str]:
@@ -191,12 +235,14 @@ def warnings_for(order: Order) -> list[str]:
             s = sum(l.sizes.values()) if l.sizes else (l.order_qty or 0)
             if l.order_qty is not None and l.order_qty != s:
                 w.append(f"{tag} / {l.color}: order qty {l.order_qty} != sum of sizes {s}")
-            if l.rate is not None and l.net_value is not None and abs(l.rate * s - l.net_value) > 0.01:
+            if l.rate is not None and l.net_value is not None and not value_matches(l.rate, s, l.net_value, l.freight, l.qty_rounded):
                 w.append(f"{tag} / {l.color}: rate x qty {l.rate*s:.2f} != net value {l.net_value:.2f}")
-        if p.stated_total_qty is not None and p.stated_total_qty != p.total_qty:
+        if p.stated_total_qty is not None and abs(p.stated_total_qty - p.total_qty) > sum(1 for l in p.lines if l.qty_rounded) * 0.5:
             w.append(f"{tag}: stated total qty {p.stated_total_qty} != computed {p.total_qty}")
         if p.stated_total_value is not None:
             vals = [l.net_value for l in p.lines if l.net_value is not None]
-            if len(vals) == len(p.lines) and abs(sum(vals) - p.stated_total_value) > 0.01:
+            fr = sum(l.freight or 0 for l in p.lines)
+            tol = 0.01 + sum(abs(l.rate or 0) * 0.5 for l in p.lines if l.qty_rounded)
+            if len(vals) == len(p.lines) and min(abs(sum(vals) - p.stated_total_value), abs(sum(vals) + fr - p.stated_total_value)) > tol:
                 w.append(f"{tag}: stated total value {p.stated_total_value} != sum of lines {sum(vals):.2f}")
     return w
